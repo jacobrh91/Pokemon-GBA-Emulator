@@ -3,8 +3,11 @@ use std::fs::File;
 use std::io;
 
 mod dma;
+mod save;
 use crate::apu::{self, Apu};
 use dma::{DmaChannel, DmaTiming};
+pub use save::SaveKind;
+use save::Savedata;
 
 pub const ROM_START: u32 = 0x0800_0000;
 pub const ROM_END: u32 = 0x0DFF_FFFF;
@@ -89,7 +92,7 @@ pub struct MemoryBus {
     pub palette_ram: Box<[u8; 1024]>,
     pub vram: Box<[u8; 96 * 1024]>,
     pub oam: Box<[u8; 1024]>,
-    pub save_ram: Box<[u8; 64 * 1024]>,
+    savedata: Savedata,
     /// Currently pressed buttons (`input` bit layout, 1 = pressed).
     pressed_buttons: u16,
     keypad_irq_active: bool,
@@ -116,15 +119,17 @@ impl MemoryBus {
         io_regs[DISPCNT] = DISPCNT_FORCED_BLANK;
         io_regs[SOUNDBIAS + 1] = SOUNDBIAS_DEFAULT_HIGH;
 
+        let savedata = Savedata::detect(&rom);
+
         Ok(Self {
             rom,
             ewram: Box::new([0; 256 * 1024]),
             iwram: Box::new([0; 32 * 1024]),
             io_regs,
+            savedata,
             palette_ram: Box::new([0; 1024]),
             vram: Box::new([0; 96 * 1024]),
             oam: Box::new([0; 1024]),
-            save_ram: Box::new([0xFF; 64 * 1024]),
             pressed_buttons: 0,
             keypad_irq_active: false,
             display_cycles: 0,
@@ -153,11 +158,16 @@ impl MemoryBus {
             Region::PaletteRam(offset) => Ok(self.palette_ram[offset]),
             Region::Vram(offset) => Ok(self.vram[offset]),
             Region::Oam(offset) => Ok(self.oam[offset]),
-            Region::SaveRam(offset) => Ok(self.save_ram[offset]),
+            Region::SaveRam(offset) => Ok(self.savedata.read(offset as u32)),
         }
     }
 
     pub fn read_u16(&self, address: u32) -> io::Result<u16> {
+        // The backup chip sits on an 8-bit bus: wider reads see the byte
+        // repeated on every lane.
+        if matches!(self.resolve(address)?, Region::SaveRam(_)) {
+            return Ok(u16::from(self.read_u8(address)?) * 0x0101);
+        }
         let low = self.read_u8(address)?;
         let high_address = address.checked_add(1).ok_or_else(|| {
             io::Error::new(
@@ -170,6 +180,9 @@ impl MemoryBus {
     }
 
     pub fn read_u32(&self, address: u32) -> io::Result<u32> {
+        if matches!(self.resolve(address)?, Region::SaveRam(_)) {
+            return Ok(u32::from(self.read_u8(address)?) * 0x0101_0101);
+        }
         let mut bytes = [0; 4];
         for (index, byte) in bytes.iter_mut().enumerate() {
             let byte_address = address.checked_add(index as u32).ok_or_else(|| {
@@ -193,6 +206,12 @@ impl MemoryBus {
 
     pub fn write_u16(&mut self, address: u32, value: u16) -> io::Result<()> {
         if (ROM_START..=ROM_END).contains(&address) {
+            return Ok(());
+        }
+        if let Region::SaveRam(offset) = self.resolve(address)? {
+            // Only one byte reaches the 8-bit chip: the lane being addressed.
+            self.savedata
+                .write(offset as u32, (value >> ((address & 1) * 8)) as u8);
             return Ok(());
         }
         let bytes = value.to_le_bytes();
@@ -392,6 +411,25 @@ impl MemoryBus {
         }
     }
 
+    pub fn save_kind(&self) -> SaveKind {
+        self.savedata.kind()
+    }
+
+    /// The backup memory image, for persisting to disk.
+    pub fn save_data(&self) -> &[u8] {
+        self.savedata.data()
+    }
+
+    /// Restores a previously persisted backup memory image.
+    pub fn load_save_data(&mut self, image: &[u8]) {
+        self.savedata.load(image);
+    }
+
+    /// True if the backup memory changed since the last call.
+    pub fn take_save_dirty(&mut self) -> bool {
+        self.savedata.take_dirty()
+    }
+
     /// Records the value on the data bus after a CPU opcode fetch.
     pub fn set_open_bus(&mut self, value: u32) {
         self.open_bus = value;
@@ -462,6 +500,11 @@ impl MemoryBus {
         if (ROM_START..=ROM_END).contains(&address) {
             return Ok(());
         }
+        if let Region::SaveRam(offset) = self.resolve(address)? {
+            self.savedata
+                .write(offset as u32, (value >> ((address & 3) * 8)) as u8);
+            return Ok(());
+        }
         let bytes = value.to_le_bytes();
         let mut regions = [Region::Ewram(0); 4];
         for (index, region) in regions.iter_mut().enumerate() {
@@ -522,7 +565,7 @@ impl MemoryBus {
             Region::PaletteRam(offset) => self.palette_ram[offset] = value,
             Region::Vram(offset) => self.vram[offset] = value,
             Region::Oam(offset) => self.oam[offset] = value,
-            Region::SaveRam(offset) => self.save_ram[offset] = value,
+            Region::SaveRam(offset) => self.savedata.write(offset as u32, value),
             Region::Io(offset) => {
                 if (apu::FIFO_A..apu::FIFO_A + 8).contains(&offset) {
                     self.apu.push_fifo((offset - apu::FIFO_A) / 4, value);
@@ -1168,5 +1211,66 @@ mod tests {
             .unwrap();
         bus.set_pressed_buttons(crate::input::A);
         assert!(!keypad_flag(&bus));
+    }
+
+    fn flash_rom() -> Vec<u8> {
+        let mut rom = vec![0u8; 0x200];
+        rom[0x100..0x10C].copy_from_slice(b"FLASH1M_V103");
+        rom
+    }
+
+    fn flash_command(bus: &mut MemoryBus, address: u32, value: u8) {
+        bus.write_u8(0x0E00_5555, 0xAA).unwrap();
+        bus.write_u8(0x0E00_2AAA, 0x55).unwrap();
+        bus.write_u8(0x0E00_0000 + address, value).unwrap();
+    }
+
+    #[test]
+    fn flash_is_detected_and_answers_the_id_command_through_the_bus() {
+        let mut bus = bus_with_rom(&flash_rom());
+        assert_eq!(bus.save_kind(), SaveKind::Flash128);
+
+        flash_command(&mut bus, 0x5555, 0x90);
+        assert_eq!(bus.read_u8(0x0E00_0000).unwrap(), 0xC2);
+        assert_eq!(bus.read_u8(0x0E00_0001).unwrap(), 0x09);
+        flash_command(&mut bus, 0x5555, 0xF0);
+        assert_eq!(bus.read_u8(0x0E00_0000).unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn flash_program_marks_dirty_and_persists_through_load() {
+        let mut bus = bus_with_rom(&flash_rom());
+        assert!(!bus.take_save_dirty());
+
+        flash_command(&mut bus, 0x5555, 0xA0);
+        bus.write_u8(0x0E00_0010, 0x42).unwrap();
+        assert!(bus.take_save_dirty());
+        assert_eq!(bus.save_data()[0x10], 0x42);
+
+        let image = bus.save_data().to_vec();
+        let mut restored = bus_with_rom(&flash_rom());
+        restored.load_save_data(&image);
+        assert_eq!(restored.read_u8(0x0E00_0010).unwrap(), 0x42);
+        assert!(!restored.take_save_dirty());
+    }
+
+    #[test]
+    fn backup_memory_uses_an_8_bit_bus() {
+        let mut bus = bus_with_rom(&[0; 4]); // no tag: SRAM
+        assert_eq!(bus.save_kind(), SaveKind::Sram);
+        bus.write_u8(0x0E00_0000, 0xAB).unwrap();
+        bus.write_u8(0x0E00_0001, 0xCD).unwrap();
+
+        // Wider reads see the addressed byte on every lane.
+        assert_eq!(bus.read_u16(0x0E00_0000).unwrap(), 0xABAB);
+        assert_eq!(bus.read_u32(0x0E00_0001).unwrap(), 0xCDCD_CDCD);
+
+        // Wider writes store only the addressed lane.
+        bus.write_u32(0x0E00_0010, 0x4433_2211).unwrap();
+        assert_eq!(bus.read_u8(0x0E00_0010).unwrap(), 0x11);
+        assert_eq!(bus.read_u8(0x0E00_0011).unwrap(), 0xFF);
+        bus.write_u16(0x0E00_0021, 0x7766).unwrap();
+        assert_eq!(bus.read_u8(0x0E00_0021).unwrap(), 0x77);
+        assert_eq!(bus.read_u8(0x0E00_0020).unwrap(), 0xFF);
     }
 }

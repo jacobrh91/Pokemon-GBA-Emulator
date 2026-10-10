@@ -18,6 +18,9 @@ fn main() {
     let last = *frames.iter().max().unwrap();
     let mut emu = Emulator::new(&rom).unwrap();
     emu.initialize_gba_startup(ROM_START).unwrap();
+    if let Ok(path) = std::env::var("SAVE_IN") {
+        emu.load_save(&std::fs::read(path).unwrap());
+    }
     let script: Vec<(u64, u16, u64)> = std::env::var("PRESS")
         .unwrap_or_default()
         .split(',')
@@ -79,7 +82,29 @@ fn main() {
                 io(0x18),
                 io(0x1C)
             );
+            println!(
+                "          BLDCNT={:#06X} BLDALPHA={:#06X} BLDY={:#06X} WININ={:#06X} WINOUT={:#06X} WIN0H={:#06X} WIN0V={:#06X} WIN1H={:#06X} WIN1V={:#06X}",
+                io(0x50),
+                io(0x52),
+                io(0x54),
+                io(0x48),
+                io(0x4A),
+                io(0x40),
+                io(0x44),
+                io(0x42),
+                io(0x46)
+            );
         }
         frame += 1;
+    }
+    if let Ok(path) = std::env::var("SAVE_OUT") {
+        std::fs::write(&path, emu.memory().save_data()).unwrap();
+        println!(
+            "wrote {} byte save to {path}",
+            emu.memory().save_data().len()
+        );
+    }
+    if let Ok(path) = std::env::var("SAVE_IN") {
+        println!("(save was loaded from {path})");
     }
 }

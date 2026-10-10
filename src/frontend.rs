@@ -3,10 +3,12 @@ use crate::volume_dock::{Pointer, VolumeDock};
 use gba_emulator::apu::SAMPLE_RATE;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::input::{self, Buttons};
+use gba_emulator::library;
 use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{Pixel, SCREEN_HEIGHT, SCREEN_WIDTH};
 use minifb::{Key, MouseMode, Scale, Window, WindowOptions};
 use std::error::Error;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -47,6 +49,8 @@ fn buttons_from_keys(is_down: impl Fn(Key) -> bool) -> Buttons {
 const TARGET_QUEUED_AUDIO_FRAMES: usize = SAMPLE_RATE as usize / 16;
 /// Longest the emulation thread waits for the audio queue to drain per frame.
 const MAX_AUDIO_WAIT: Duration = Duration::from_millis(40);
+/// How often (in frames) the emulation thread checks for unsaved backup data.
+const SAVE_CHECK_INTERVAL_FRAMES: u32 = 30;
 
 /// State shared between the UI thread and the emulation thread.
 struct Shared {
@@ -59,9 +63,18 @@ struct Shared {
     error: Mutex<Option<String>>,
 }
 
-pub fn run(rom_path: &str) -> Result<(), Box<dyn Error>> {
+pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     let mut emulator = Emulator::new(rom_path)?;
     emulator.initialize_gba_startup(ROM_START)?;
+    if let Some(image) = library::read_save(save_path)? {
+        emulator.load_save(&image);
+        eprintln!("loaded save {}", save_path.display());
+    }
+    eprintln!(
+        "backup memory: {:?}, save file {}",
+        emulator.save_kind(),
+        save_path.display()
+    );
 
     let mut window = Window::new(
         "GBA Emulator",
@@ -93,9 +106,10 @@ pub fn run(rom_path: &str) -> Result<(), Box<dyn Error>> {
     let worker = {
         let shared = Arc::clone(&shared);
         let sink = audio.as_ref().map(AudioOutput::sink);
+        let save_path = save_path.to_path_buf();
         thread::Builder::new()
             .name("emulation".into())
-            .spawn(move || emulation_loop(emulator, sink, &shared))?
+            .spawn(move || emulation_loop(emulator, sink, &shared, &save_path))?
     };
 
     let mut dock = VolumeDock::new(DEFAULT_VOLUME);
@@ -143,8 +157,14 @@ pub fn run(rom_path: &str) -> Result<(), Box<dyn Error>> {
 }
 
 /// Runs the emulator, publishing frames and audio until told to stop.
-fn emulation_loop(mut emulator: Emulator, sink: Option<AudioSink>, shared: &Shared) {
+fn emulation_loop(
+    mut emulator: Emulator,
+    sink: Option<AudioSink>,
+    shared: &Shared,
+    save_path: &Path,
+) {
     let mut next_frame = Instant::now();
+    let mut frames_since_save_check = 0_u32;
     let mut instructions = 0_u64;
 
     while shared.running.load(Ordering::Relaxed) {
@@ -160,6 +180,7 @@ fn emulation_loop(mut emulator: Emulator, sink: Option<AudioSink>, shared: &Shar
                     ));
                 }
                 shared.running.store(false, Ordering::Relaxed);
+                flush_save(&mut emulator, save_path);
                 return;
             }
             instructions += 1;
@@ -176,6 +197,13 @@ fn emulation_loop(mut emulator: Emulator, sink: Option<AudioSink>, shared: &Shar
         }
 
         shared.frames.fetch_add(1, Ordering::Relaxed);
+
+        // Persist backup memory shortly after a game writes it.
+        frames_since_save_check += 1;
+        if frames_since_save_check >= SAVE_CHECK_INTERVAL_FRAMES {
+            frames_since_save_check = 0;
+            flush_save(&mut emulator, save_path);
+        }
 
         match &sink {
             // Audio-paced: sleep while the device still has plenty queued.
@@ -199,6 +227,17 @@ fn emulation_loop(mut emulator: Emulator, sink: Option<AudioSink>, shared: &Shar
                     next_frame = now;
                 }
             }
+        }
+    }
+    // Shutting down: make sure the last writes reach the disk.
+    flush_save(&mut emulator, save_path);
+}
+
+/// Writes the backup image if the game changed it.
+fn flush_save(emulator: &mut Emulator, save_path: &Path) {
+    if let Some(image) = emulator.take_save_if_changed() {
+        if let Err(error) = library::write_save(save_path, &image) {
+            eprintln!("could not write save {}: {error}", save_path.display());
         }
     }
 }
@@ -248,7 +287,14 @@ mod tests {
         });
         let worker = {
             let shared = Arc::clone(&shared);
-            thread::spawn(move || emulation_loop(emulator, sink, &shared))
+            thread::spawn(move || {
+                emulation_loop(
+                    emulator,
+                    sink,
+                    &shared,
+                    Path::new("/nonexistent-dir/never-written.sav"),
+                )
+            })
         };
         thread::sleep(Duration::from_millis(millis));
         shared.running.store(false, Ordering::Relaxed);
@@ -304,5 +350,46 @@ mod tests {
     #[test]
     fn converts_rgba_pixels_to_window_rgb_format() {
         assert_eq!(pixel_to_rgb([0x12, 0x34, 0x56, 0xFF]), 0x0012_3456);
+    }
+
+    #[test]
+    fn changed_backup_memory_is_flushed_once_and_reloaded() {
+        static NEXT: AtomicU64 = AtomicU64::new(100);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("gba-save-test-{}-{id}", std::process::id()));
+        let rom = directory.join("game.gba");
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut image = vec![0u8; 0x200];
+        image[0x100..0x10C].copy_from_slice(b"FLASH1M_V103");
+        std::fs::write(&rom, image).unwrap();
+        let save = directory.join("saves/game.sav");
+
+        let mut emulator = Emulator::new(rom.to_str().unwrap()).unwrap();
+        // Unlock + program one byte through the cartridge bus.
+        let bus = emulator.memory_mut();
+        for (address, value) in [
+            (0x5555, 0xAA),
+            (0x2AAA, 0x55),
+            (0x5555, 0xA0),
+            (0x0042, 0x7E),
+        ] {
+            bus.write_u8(0x0E00_0000 + address, value).unwrap();
+        }
+
+        flush_save(&mut emulator, &save);
+        let written = std::fs::read(&save).unwrap();
+        assert_eq!(written.len(), 128 * 1024);
+        assert_eq!(written[0x42], 0x7E);
+
+        // Nothing changed since: no rewrite.
+        std::fs::remove_file(&save).unwrap();
+        flush_save(&mut emulator, &save);
+        assert!(!save.exists());
+
+        let mut reloaded = Emulator::new(rom.to_str().unwrap()).unwrap();
+        reloaded.load_save(&written);
+        assert_eq!(reloaded.memory().read_u8(0x0E00_0042).unwrap(), 0x7E);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

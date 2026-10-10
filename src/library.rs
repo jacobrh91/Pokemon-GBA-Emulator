@@ -214,6 +214,34 @@ impl Library {
     }
 }
 
+/// Where a ROM that is run straight from a file keeps its save: beside the
+/// ROM, with a `.sav` extension.
+pub fn sibling_save_path(rom: &Path) -> PathBuf {
+    rom.with_extension("sav")
+}
+
+/// Reads a backup image, or `None` if there is no save yet.
+pub fn read_save(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(image) => Ok(Some(image)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Writes a backup image through a temporary file so an interrupted write
+/// can never replace a good save with a truncated one.
+pub fn write_save(path: &Path, image: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = PathBuf::from(partial);
+    fs::write(&partial, image)?;
+    fs::rename(&partial, path)
+}
+
 fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -335,6 +363,27 @@ mod tests {
 
         assert!(library.install(&work.join("missing.gba"), false).is_err());
         assert!(!library.root().exists());
+    }
+
+    #[test]
+    fn save_files_round_trip_atomically_and_missing_means_none() {
+        let work = scratch();
+        let path = work.join("saves/Game.sav");
+        assert_eq!(read_save(&path).unwrap(), None);
+
+        write_save(&path, &[1, 2, 3]).unwrap();
+        assert_eq!(read_save(&path).unwrap(), Some(vec![1, 2, 3]));
+        write_save(&path, &[9]).unwrap();
+        assert_eq!(read_save(&path).unwrap(), Some(vec![9]));
+        assert!(!work.join("saves/Game.sav.partial").exists());
+    }
+
+    #[test]
+    fn sibling_save_sits_next_to_the_rom() {
+        assert_eq!(
+            sibling_save_path(Path::new("/roms/Game (v1.0).gba")),
+            PathBuf::from("/roms/Game (v1.0).sav")
+        );
     }
 
     #[test]

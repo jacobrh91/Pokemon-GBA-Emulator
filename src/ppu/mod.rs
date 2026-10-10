@@ -58,11 +58,17 @@ impl Ppu {
         let vram = &memory.vram[..VRAM_SIZE];
         let backdrop = rgb555(palette, 0);
         row.fill(backdrop);
-        if display_control & 0x7 != 0 {
-            return;
-        }
+        // Which layers are regular text backgrounds depends on the video
+        // mode: 0 has BG0-3, 1 has BG0-1 (BG2 is affine), and modes 2-5 have
+        // none. Affine and bitmap layers are not rendered yet.
+        let text_layers: u8 = match display_control & 0x7 {
+            0 => 0b1111,
+            1 => 0b0011,
+            _ => 0,
+        };
 
         let enabled_backgrounds = (0..4)
+            .filter(|background| text_layers & (1 << background) != 0)
             .filter(|background| display_control & (1 << (8 + background)) != 0)
             .map(|background| {
                 let control = register(registers, BG_CONTROL_BASE + background * 2);
@@ -427,6 +433,36 @@ mod tests {
         assert_eq!(
             window_range((30 << 8) | 20, SCREEN_WIDTH),
             (30, SCREEN_WIDTH)
+        );
+    }
+
+    #[test]
+    fn mode_one_draws_text_layers_zero_and_one_only() {
+        let mut memory = memory_bus();
+        // Solid color-1 tile 1 on BG0; BG2 (affine in mode 1) must not draw.
+        for entry in 0..(32 * 32) {
+            memory.write_u16(VRAM_START + entry * 2, 1).unwrap();
+        }
+        for row in 0..8 {
+            memory
+                .write_u32(VRAM_START + 0x4000 + 32 + row * 4, 0x1111_1111)
+                .unwrap();
+        }
+        memory.write_u16(PALETTE_RAM_START + 2, 0x001F).unwrap();
+
+        let mut ppu = Ppu::default();
+        let mut registers = [0u8; 0x60];
+        registers[0] = 1; // mode 1
+        registers[1] = 0x01; // BG0 on
+        registers[8] = 0x04; // BG0CNT char base 1
+        ppu.render_scanline(0, &registers, &memory);
+        assert_eq!(ppu.framebuffer()[0], rgb555(&memory.palette_ram[..], 1));
+
+        registers[1] = 0x04; // only BG2 on: affine, not rendered
+        ppu.render_scanline(1, &registers, &memory);
+        assert_eq!(
+            ppu.framebuffer()[SCREEN_WIDTH],
+            rgb555(&memory.palette_ram[..], 0)
         );
     }
 }

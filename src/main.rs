@@ -2,7 +2,7 @@ mod audio_output;
 mod frontend;
 mod volume_dock;
 
-use gba_emulator::library::{InstallOutcome, LIBRARY_ENV, Library};
+use gba_emulator::library::{InstallOutcome, LIBRARY_ENV, Library, sibling_save_path};
 use std::path::{Path, PathBuf};
 
 /// Used when no argument is given and the file exists (development default).
@@ -93,20 +93,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("  saves: {}", installed.saves_directory.display());
         }
         Command::Run(target) => {
-            let rom_path = resolve_rom(target.as_deref())?;
-            frontend::run(&rom_path.to_string_lossy())?;
+            let (rom_path, save_path) = resolve_rom(target.as_deref())?;
+            frontend::run(&rom_path.to_string_lossy(), &save_path)?;
         }
     }
     Ok(())
 }
 
-/// A path to an existing file wins; otherwise the argument names an
-/// installed ROM.
-fn resolve_rom(target: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+/// Returns `(rom, save file)`. A path to an existing file wins and keeps its
+/// save beside it; otherwise the argument names an installed ROM, whose save
+/// lives in its `saves/` directory.
+fn resolve_rom(target: Option<&str>) -> Result<(PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    let beside = |rom: &str| (PathBuf::from(rom), sibling_save_path(Path::new(rom)));
     match target {
-        None if Path::new(DEFAULT_ROM_PATH).is_file() => Ok(DEFAULT_ROM_PATH.into()),
+        None if Path::new(DEFAULT_ROM_PATH).is_file() => Ok(beside(DEFAULT_ROM_PATH)),
         None => Err(format!("no ROM given and {DEFAULT_ROM_PATH} was not found\n\n{USAGE}").into()),
-        Some(target) if Path::new(target).is_file() => Ok(target.into()),
+        Some(target) if Path::new(target).is_file() => Ok(beside(target)),
         Some(target) => {
             let library = Library::default_location()?;
             let installed = library.find(target).map_err(|error| {
@@ -115,7 +117,8 @@ fn resolve_rom(target: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Erro
                     library.root().display()
                 )
             })?;
-            Ok(installed.rom_path)
+            let save_path = installed.save_path();
+            Ok((installed.rom_path, save_path))
         }
     }
 }

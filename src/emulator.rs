@@ -87,6 +87,23 @@ impl Emulator {
         }
     }
 
+    /// Cartridge backup memory type detected from the ROM.
+    pub fn save_kind(&self) -> crate::mmu::SaveKind {
+        self.memory.save_kind()
+    }
+
+    /// Restores a persisted backup memory image (call before running).
+    pub fn load_save(&mut self, image: &[u8]) {
+        self.memory.load_save_data(image);
+    }
+
+    /// The backup image if it changed since the last call.
+    pub fn take_save_if_changed(&mut self) -> Option<Vec<u8>> {
+        self.memory
+            .take_save_dirty()
+            .then(|| self.memory.save_data().to_vec())
+    }
+
     /// Sets the held buttons (see [`crate::input`]) for subsequent steps.
     pub fn set_buttons(&mut self, buttons: crate::input::Buttons) {
         self.memory
