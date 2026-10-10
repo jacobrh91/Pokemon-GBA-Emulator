@@ -1,5 +1,5 @@
 use crate::cpu::Cpu;
-use crate::mmu::MemoryBus;
+use crate::mmu::{MemoryBus, ROM_START};
 use crate::ppu::{Ppu, SCREEN_HEIGHT};
 use std::io;
 
@@ -7,11 +7,74 @@ const THUMB_STATE: u32 = 1 << 5;
 /// Granularity at which a halted CPU lets the rest of the system advance.
 const HALT_STEP_CYCLES: u32 = 32;
 
+/// Recognises a loop that leaves the whole machine state unchanged.
+///
+/// At every backward jump the detector compares the CPU state and the bus's
+/// write/volatile-read counters with those at the previous jump to the same
+/// address. If nothing changed, one more iteration would change nothing
+/// either, until an interrupt, DMA transfer or timer event intervenes, so the
+/// emulator may advance time by whole iterations up to the next event.
+#[derive(Default)]
+struct IdleLoopDetector {
+    armed: bool,
+    head: u32,
+    registers: [u32; 16],
+    cpsr: u32,
+    writes: u64,
+    flushes: u64,
+    volatile_reads: u32,
+    cycles: u64,
+}
+
+impl IdleLoopDetector {
+    /// Records a backward jump; returns the loop's cycle length if the
+    /// iteration just finished was provably a no-op.
+    fn observe(&mut self, cpu: &Cpu, memory: &MemoryBus) -> Option<u64> {
+        let head = cpu.registers[15];
+        let writes = memory.write_count();
+        let flushes = memory.flush_count();
+        let volatile_reads = memory.volatile_read_count();
+        let idle = self.armed
+            && self.head == head
+            && self.cpsr == cpu.cpsr
+            && self.registers == cpu.registers
+            && self.writes == writes
+            // No event may have fired inside the iteration: one that did
+            // changes what the next iteration sees (a scanline counter, a
+            // flag set by an interrupt) even though this one looked idle.
+            && self.flushes == flushes
+            && self.volatile_reads == volatile_reads;
+        let iteration = if idle {
+            cpu.cycles.checked_sub(self.cycles)
+        } else {
+            None
+        };
+
+        self.armed = true;
+        self.head = head;
+        self.cpsr = cpu.cpsr;
+        self.registers = cpu.registers;
+        self.writes = writes;
+        self.flushes = flushes;
+        self.volatile_reads = volatile_reads;
+        self.cycles = cpu.cycles;
+        iteration
+    }
+
+    fn reset(&mut self) {
+        self.armed = false;
+    }
+}
+
 pub struct Emulator {
     cpu: Cpu,
     memory: MemoryBus,
     ppu: Ppu,
     frame_ready: bool,
+    rendering: bool,
+    idle: IdleLoopDetector,
+    skip_idle_loops: bool,
+    rom_path: String,
 }
 
 impl Emulator {
@@ -26,7 +89,29 @@ impl Emulator {
             memory: MemoryBus::new(rom_path)?,
             ppu: Ppu::default(),
             frame_ready: false,
+            rendering: true,
+            idle: IdleLoopDetector::default(),
+            skip_idle_loops: true,
+            rom_path: rom_path.to_owned(),
         })
+    }
+
+    /// Restarts the game as if the console had been power-cycled: CPU, RAM,
+    /// I/O, video, audio and timing return to their boot state and the CPU
+    /// starts at the cartridge entry point. The cartridge's backup memory
+    /// (the save) is kept, exactly as it would survive a reset on hardware.
+    ///
+    /// The `set_rendering` and idle-skipping switches keep their settings.
+    pub fn reset(&mut self) -> io::Result<()> {
+        let save_image = self.memory.save_data().to_vec();
+        let mut memory = MemoryBus::new(&self.rom_path)?;
+        memory.load_save_data(&save_image);
+        self.memory = memory;
+        self.cpu = Cpu::default();
+        self.ppu = Ppu::default();
+        self.frame_ready = false;
+        self.idle = IdleLoopDetector::default();
+        self.cpu.initialize_gba_startup(ROM_START)
     }
 
     pub fn step_thumb(&mut self) -> io::Result<u32> {
@@ -39,6 +124,7 @@ impl Emulator {
 
     pub fn step(&mut self) -> io::Result<u32> {
         if self.cpu.halted {
+            self.idle.reset();
             if !self.cpu.should_wake(&self.memory) {
                 self.cpu.cycles += u64::from(HALT_STEP_CYCLES);
                 self.advance_bus(HALT_STEP_CYCLES);
@@ -51,19 +137,31 @@ impl Emulator {
             }
         }
 
-        if let Some(cycles) = self.cpu.step_bios_hle(&mut self.memory)? {
-            return Ok(cycles);
+        // The BIOS hooks (SWI vector, IRQ return stub) live in the first
+        // 0x200 bytes; skip the call everywhere else.
+        if self.cpu.registers[15] < 0x200 {
+            if let Some(cycles) = self.cpu.step_bios_hle(&mut self.memory)? {
+                self.idle.reset();
+                return Ok(cycles);
+            }
         }
 
+        let pc_before = self.cpu.registers[15];
         let mut cycles = if self.cpu.cpsr & THUMB_STATE != 0 {
             self.step_thumb()
         } else {
             self.cpu.step_arm(&mut self.memory)
         }?;
         self.advance_bus(cycles);
-        // DMA stalls the CPU for as long as it owns the bus.
-        let dma_cycles = self.memory.take_dma_cycles();
-        if dma_cycles > 0 {
+        // DMA stalls the CPU for as long as it owns the bus. Charging a stall
+        // advances time, which can trigger further transfers (a refill that
+        // crosses a scanline, say), so drain until none is left; otherwise
+        // the follow-on stall would be billed to the next instruction.
+        loop {
+            let dma_cycles = self.memory.take_dma_cycles();
+            if dma_cycles == 0 {
+                break;
+            }
             self.cpu.cycles += u64::from(dma_cycles);
             self.advance_bus(dma_cycles);
             cycles += dma_cycles;
@@ -72,15 +170,63 @@ impl Emulator {
             self.advance_bus(3);
             cycles += 3;
         }
+        // Looked at last, once this step's DMA stall and interrupt entry have
+        // been charged, so loop timestamps measure only the loop itself.
+        if self.skip_idle_loops && self.cpu.registers[15] <= pc_before {
+            cycles += self.skip_idle_iterations();
+        }
         Ok(cycles)
+    }
+
+    /// Enables or disables idle-loop skipping (on by default). Skipping is
+    /// exact; the switch exists for debugging and for verifying that.
+    pub fn set_idle_loop_skipping(&mut self, enabled: bool) {
+        self.skip_idle_loops = enabled;
+        self.idle.reset();
+    }
+
+    /// After a backward jump: if the loop is provably idle, advances time by
+    /// whole iterations, stopping at least one iteration short of the next
+    /// event so the event lands on exactly the instruction it would have.
+    /// Returns the cycles skipped.
+    fn skip_idle_iterations(&mut self) -> u32 {
+        let Some(iteration) = self.idle.observe(&self.cpu, &self.memory) else {
+            return 0;
+        };
+        let Ok(iteration) = u32::try_from(iteration) else {
+            return 0;
+        };
+        if iteration == 0 {
+            return 0;
+        }
+        let iterations = (self.memory.cycles_until_next_event() / iteration).saturating_sub(1);
+        let skipped = iterations * iteration;
+        if skipped == 0 {
+            return 0;
+        }
+        self.cpu.cycles += u64::from(skipped);
+        self.advance_bus(skipped);
+        // The skipped iterations leave the detector's snapshot valid but its
+        // cycle stamp stale; re-arm from the current point.
+        self.idle.cycles = self.cpu.cycles;
+        skipped
     }
 
     /// Advances the bus and draws every scanline that finished meanwhile.
     fn advance_bus(&mut self, cycles: u32) {
         self.memory.advance(cycles);
+        if !self.memory.has_scanlines() {
+            return;
+        }
         for snapshot in self.memory.take_scanlines() {
-            self.ppu
-                .render_scanline(snapshot.line, &snapshot.registers, &self.memory);
+            if self.rendering {
+                self.ppu.render_scanline_with_events(
+                    snapshot.line,
+                    &snapshot.registers,
+                    &self.memory,
+                    snapshot.affine_reload,
+                );
+            }
             if snapshot.line == SCREEN_HEIGHT - 1 {
                 self.frame_ready = true;
             }
@@ -113,6 +259,16 @@ impl Emulator {
     /// Stereo audio samples (32768 Hz, `[left, right]`) mixed since the last call.
     pub fn take_audio_samples(&mut self) -> Vec<[i16; 2]> {
         self.memory.take_audio_samples()
+    }
+
+    /// Enables or disables drawing. While disabled, emulation, timing and
+    /// frame-ready signalling continue unchanged but the framebuffer keeps
+    /// its last contents; used to skip frames that will not be shown.
+    ///
+    /// Switch it at frame boundaries (right after `take_frame_ready`):
+    /// affine background state is per frame and must see a whole frame.
+    pub fn set_rendering(&mut self, enabled: bool) {
+        self.rendering = enabled;
     }
 
     /// True once per frame, after the last visible scanline was drawn.
@@ -529,5 +685,266 @@ mod tests {
         assert_eq!(read(8), -0x200); // pb = -sx*sin
         assert_eq!(read(16), 0x100); // pc = sy*sin
         assert_eq!(read(24), 0); // pd = sy*cos
+    }
+
+    #[test]
+    fn disabling_rendering_skips_drawing_but_not_frame_timing() {
+        // ARM `b .`; the display starts in forced blank (white) so drawing
+        // would change the framebuffer from its initial all-zero state.
+        let path = arm_rom_file(0xEAFF_FFFE);
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        fs::remove_file(path).unwrap();
+        emulator.initialize_gba_startup(ROM_START).unwrap();
+
+        emulator.set_rendering(false);
+        let mut steps = 0;
+        while !emulator.take_frame_ready() {
+            emulator.step().unwrap();
+            steps += 1;
+            assert!(steps < 1_000_000, "frame never completed");
+        }
+        assert!(emulator.ppu().framebuffer().iter().all(|p| *p == [0; 4]));
+
+        emulator.set_rendering(true);
+        while !emulator.take_frame_ready() {
+            emulator.step().unwrap();
+        }
+        assert!(emulator.ppu().framebuffer().iter().any(|p| *p != [0; 4]));
+    }
+
+    // ---- idle-loop skipping ------------------------------------------------
+
+    fn arm_program_file(words: &[u32]) -> std::path::PathBuf {
+        let id = NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "gba-emulator-idle-test-{}-{id}.gba",
+            std::process::id()
+        ));
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn emulator_for(words: &[u32], skipping: bool) -> Emulator {
+        let path = arm_program_file(words);
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        fs::remove_file(path).unwrap();
+        emulator.initialize_gba_startup(ROM_START).unwrap();
+        emulator.set_rendering(false);
+        emulator.set_idle_loop_skipping(skipping);
+        emulator
+    }
+
+    /// Steps until the PC reaches `target`; returns `(cpu cycles, steps)`.
+    fn run_to_pc(emulator: &mut Emulator, target: u32) -> (u64, u64) {
+        let mut steps = 0;
+        while emulator.cpu().registers[15] != target {
+            emulator.step().unwrap();
+            steps += 1;
+            assert!(steps < 5_000_000, "never reached {target:#X}");
+        }
+        (emulator.cpu().cycles, steps)
+    }
+
+    /// `ldr r1,=0x03000000; loop: ldr r0,[r1]; cmp r0,#0; beq loop; b .`
+    const FLAG_POLL: [u32; 6] = [
+        0xE59F_100C,
+        0xE591_0000,
+        0xE350_0000,
+        0x0AFF_FFFC,
+        0xEAFF_FFFE,
+        0x0300_0000,
+    ];
+
+    fn arm_hblank_dma_sets_flag(emulator: &mut Emulator) {
+        let io = IO_REG_START;
+        let memory = emulator.memory_mut();
+        memory.write_u16(crate::mmu::EWRAM_START, 1).unwrap();
+        memory
+            .write_u32(io + 0xB0, crate::mmu::EWRAM_START)
+            .unwrap();
+        memory
+            .write_u32(io + 0xB4, crate::mmu::IWRAM_START)
+            .unwrap();
+        memory.write_u16(io + 0xB8, 1).unwrap();
+        // Enable, HBlank timing, 16-bit units, one transfer.
+        memory.write_u16(io + 0xBA, 0x8000 | (2 << 12)).unwrap();
+    }
+
+    #[test]
+    fn a_flag_polling_loop_exits_at_the_same_cycle_when_skipped() {
+        let mut plain = emulator_for(&FLAG_POLL, false);
+        let mut fast = emulator_for(&FLAG_POLL, true);
+        arm_hblank_dma_sets_flag(&mut plain);
+        arm_hblank_dma_sets_flag(&mut fast);
+
+        let (plain_cycles, plain_steps) = run_to_pc(&mut plain, ROM_START + 0x10);
+        let (fast_cycles, fast_steps) = run_to_pc(&mut fast, ROM_START + 0x10);
+
+        assert!(plain_cycles > 900, "waited for the first HBlank");
+        assert_eq!(fast_cycles, plain_cycles, "exit lands on the same cycle");
+        assert_eq!(fast.cpu().registers, plain.cpu().registers);
+        assert!(
+            fast_steps * 10 < plain_steps,
+            "skipping should remove most steps: {fast_steps} vs {plain_steps}"
+        );
+    }
+
+    #[test]
+    fn counting_loops_are_never_skipped() {
+        // mov r0,#0x400; loop: subs r0,r0,#1; bne loop; b .
+        let program = [0xE3A0_0B01, 0xE250_0001, 0x1AFF_FFFD, 0xEAFF_FFFE];
+        let mut plain = emulator_for(&program, false);
+        let mut fast = emulator_for(&program, true);
+
+        let (plain_cycles, plain_steps) = run_to_pc(&mut plain, ROM_START + 0x0C);
+        let (fast_cycles, fast_steps) = run_to_pc(&mut fast, ROM_START + 0x0C);
+
+        assert_eq!(fast_cycles, plain_cycles);
+        assert_eq!(fast_steps, plain_steps, "registers change every iteration");
+        assert_eq!(fast.cpu().registers[0], 0);
+    }
+
+    #[test]
+    fn loops_waiting_on_a_timer_counter_are_not_skipped() {
+        // ldr r1,=TM0CNT; loop: ldrh r0,[r1]; cmp r0,#0x800; blo loop; b .
+        let program = [
+            0xE59F_1010,
+            0xE1D1_00B0,
+            0xE350_0B02,
+            0x3AFF_FFFC,
+            0xEAFF_FFFE,
+            0x0000_0000,
+            0x0400_0100,
+        ];
+        let mut plain = emulator_for(&program, false);
+        let mut fast = emulator_for(&program, true);
+        for emulator in [&mut plain, &mut fast] {
+            let memory = emulator.memory_mut();
+            memory.write_u16(IO_REG_START + 0x100, 0).unwrap();
+            memory.write_u16(IO_REG_START + 0x102, 0x0080).unwrap();
+        }
+
+        let (plain_cycles, plain_steps) = run_to_pc(&mut plain, ROM_START + 0x10);
+        let (fast_cycles, fast_steps) = run_to_pc(&mut fast, ROM_START + 0x10);
+
+        assert!(plain_cycles >= 0x800, "timer counted to the threshold");
+        assert_eq!(fast_cycles, plain_cycles);
+        assert_eq!(fast_steps, plain_steps, "the counter varies per cycle");
+    }
+
+    #[test]
+    fn loops_that_write_memory_are_not_skipped() {
+        // ldr r1,=0x03000000; loop: str r0,[r1]; cmp r0,#0; beq loop
+        let program = [
+            0xE59F_100C,
+            0xE581_0000,
+            0xE350_0000,
+            0x0AFF_FFFC,
+            0,
+            0x0300_0000,
+        ];
+        let mut plain = emulator_for(&program, false);
+        let mut fast = emulator_for(&program, true);
+
+        for emulator in [&mut plain, &mut fast] {
+            for _ in 0..2 {
+                while !emulator.take_frame_ready() {
+                    emulator.step().unwrap();
+                }
+            }
+        }
+        // Same cycles and, because nothing was skipped, identical work done.
+        assert_eq!(fast.cpu().cycles, plain.cpu().cycles);
+        assert_eq!(fast.cpu().registers, plain.cpu().registers);
+        assert!(fast.memory().write_count() > 1000);
+        assert_eq!(fast.memory().write_count(), plain.memory().write_count());
+    }
+
+    #[test]
+    fn skipping_does_not_change_frame_timing() {
+        // A bare `b .` is the most idle program possible.
+        let program = [0xEAFF_FFFE];
+        let mut plain = emulator_for(&program, false);
+        let mut fast = emulator_for(&program, true);
+        let mut fast_steps = 0u64;
+        let mut plain_steps = 0u64;
+        for _ in 0..5 {
+            while !fast.take_frame_ready() {
+                fast.step().unwrap();
+                fast_steps += 1;
+            }
+            while !plain.take_frame_ready() {
+                plain.step().unwrap();
+                plain_steps += 1;
+            }
+            assert_eq!(fast.cpu().cycles, plain.cpu().cycles);
+        }
+        // Audio samples (every 512 cycles) bound each skip: about 18x fewer.
+        assert!(
+            fast_steps * 10 < plain_steps,
+            "{fast_steps} vs {plain_steps}"
+        );
+    }
+
+    #[test]
+    fn reset_restarts_the_console_but_keeps_the_save() {
+        // A flash cartridge whose program is a bare `b .`.
+        let id = NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "gba-emulator-reset-test-{}-{id}.gba",
+            std::process::id()
+        ));
+        let mut rom = vec![0u8; 0x200];
+        rom[..4].copy_from_slice(&0xEAFF_FFFEu32.to_le_bytes());
+        rom[0x100..0x10C].copy_from_slice(b"FLASH1M_V103");
+        fs::write(&path, rom).unwrap();
+        // `reset` reopens the ROM, so the file must outlive the emulator.
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        emulator.initialize_gba_startup(ROM_START).unwrap();
+        emulator.set_rendering(false);
+
+        // Run, dirty RAM and registers, and program one byte of Flash.
+        for _ in 0..3 {
+            while !emulator.take_frame_ready() {
+                emulator.step().unwrap();
+            }
+        }
+        let bus = emulator.memory_mut();
+        bus.write_u32(crate::mmu::IWRAM_START, 0xDEAD_BEEF).unwrap();
+        bus.write_u16(IO_REG_START + 0x200, 0x0001).unwrap();
+        for (address, value) in [
+            (0x5555, 0xAA),
+            (0x2AAA, 0x55),
+            (0x5555, 0xA0),
+            (0x0042, 0x7E),
+        ] {
+            bus.write_u8(0x0E00_0000 + address, value).unwrap();
+        }
+        emulator.cpu_mut().registers[0] = 99;
+        assert!(emulator.cpu().cycles > 0);
+
+        emulator.reset().unwrap();
+
+        // Back at boot: ROM entry, zeroed RAM and registers, fresh timing.
+        assert_eq!(emulator.cpu().registers[15], ROM_START);
+        assert_eq!(emulator.cpu().registers[0], 0);
+        assert_eq!(emulator.cpu().cycles, 0);
+        assert_eq!(emulator.cpu().mode(), 0x1F);
+        assert_eq!(
+            emulator.memory().read_u32(crate::mmu::IWRAM_START).unwrap(),
+            0
+        );
+        assert_eq!(emulator.memory().read_u16(IO_REG_START + 0x200).unwrap(), 0);
+        assert!(!emulator.take_frame_ready());
+        // The save survived, and the console runs again.
+        assert_eq!(emulator.memory().read_u8(0x0E00_0042).unwrap(), 0x7E);
+        for _ in 0..2 {
+            while !emulator.take_frame_ready() {
+                emulator.step().unwrap();
+            }
+        }
+        assert!(emulator.cpu().cycles > 0);
+        fs::remove_file(path).unwrap();
     }
 }

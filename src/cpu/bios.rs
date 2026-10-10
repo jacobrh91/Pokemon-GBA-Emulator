@@ -43,6 +43,10 @@ impl Cpu {
     /// Returns `Some(cycles)` when a hook consumed this step.
     pub fn step_bios_hle(&mut self, bus: &mut MemoryBus) -> io::Result<Option<u32>> {
         let pc = self.registers[15];
+        // Both hooks live in the first 0x200 bytes of the BIOS region.
+        if pc >= 0x200 {
+            return Ok(None);
+        }
         if self.mode() == MODE_SUPERVISOR && pc == VECTOR_SWI {
             let service = self.pending_swi_service(bus)?;
             self.handle_bios_swi(service, bus)?;

@@ -47,6 +47,14 @@ impl AudioSink {
         }
     }
 
+    /// Drops everything queued, so a restarted game does not play the tail of
+    /// the previous one.
+    pub fn clear(&self) {
+        if let Ok(mut queue) = self.queue.lock() {
+            queue.clear();
+        }
+    }
+
     /// Source frames (32768 Hz) waiting to be played.
     pub fn queued_frames(&self) -> usize {
         self.queue.lock().map_or(0, |queue| queue.len())

@@ -213,8 +213,9 @@ fn thumb_word_and_byte_load_store_use_bus_memory() {
         0x1234_56AB
     );
 
+    // Loads are 1S+1N+1I = 3 cycles; stores are 2N = 2 cycles.
     cpu.registers[1] = TEST_PROGRAM_ADDRESS + 0x100;
-    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 2);
+    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 3);
     assert_eq!(cpu.registers[2], 0x1234_56AB);
 
     cpu.registers[1] = TEST_PROGRAM_ADDRESS + 0x100;
@@ -222,9 +223,9 @@ fn thumb_word_and_byte_load_store_use_bus_memory() {
     assert_eq!(bus.read_u8(TEST_PROGRAM_ADDRESS + 0x101).unwrap(), 0xAB);
 
     cpu.registers[1] = TEST_PROGRAM_ADDRESS + 0x100;
-    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 2);
+    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 3);
     assert_eq!(cpu.registers[2], 0xAB);
-    assert_eq!(cpu.cycles, 8);
+    assert_eq!(cpu.cycles, 10);
 }
 
 #[test]

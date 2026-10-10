@@ -1,5 +1,9 @@
 //! Draws the volume dock over a PPM screenshot and writes the result as PPM.
 //! usage: dock_preview IN_240x160.ppm OUT.ppm VOLUME [muted]
+#[path = "../src/draw.rs"]
+mod draw;
+#[path = "../src/hud.rs"]
+mod hud;
 #[path = "../src/volume_dock.rs"]
 mod volume_dock;
 
@@ -27,7 +31,7 @@ fn main() {
 
     let mut dock = VolumeDock::new(volume);
     let hover = Pointer {
-        position: Some((w as f32 / 2.0, h as f32 - 20.0)),
+        position: Some((w as f32 / 2.0, h as f32 / 2.0)),
         left_down: false,
         scroll: 0.0,
     };
@@ -43,7 +47,27 @@ fn main() {
         };
         dock.update(click, w, h);
     }
+    if let Ok(index) = std::env::var("SPEED") {
+        // Click speed button `index` (0=2X .. 3=MAX); the dock is 615 wide, the
+        // buttons start 345 px in and are spaced 64 px apart.
+        let index: f32 = index.parse().unwrap();
+        let dock_x = (w as f32 - 615.0) / 2.0;
+        let x = dock_x + 345.0 + index * 64.0 + 20.0;
+        let y = h as f32 - 18.0 - 30.0;
+        dock.update(
+            Pointer {
+                position: Some((x, y)),
+                left_down: true,
+                scroll: 0.0,
+            },
+            w,
+            h,
+        );
+    }
     dock.draw(&mut buffer, w, h);
+    if let Ok(factor) = std::env::var("FF") {
+        hud::draw_fast_forward(&mut buffer, w, h, factor.parse().unwrap());
+    }
 
     let mut data = format!("P6\n{w} {h}\n255\n").into_bytes();
     for p in buffer {

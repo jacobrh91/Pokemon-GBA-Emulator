@@ -1,22 +1,36 @@
-//! A volume control that slides up from the bottom of the window while the
-//! mouse hovers there and slides away again when it leaves.
+//! A control dock (power, restart, volume, fast-forward speed) that slides up from
+//! the bottom of the window whenever the mouse moves over it, and slides away
+//! again once the mouse has been still for a moment or leaves the window.
 //!
 //! Interaction logic ([`VolumeDock::update`]) is separate from drawing
 //! ([`VolumeDock::draw`]) so it can be unit tested without a window.
 
-/// Height of the hover strip along the bottom of the window that reveals the dock.
+use crate::draw::{Canvas, GLYPH_HEIGHT, GLYPH_WIDTH, Rect, TEXT_SCALE};
+
+/// Height of the strip along the bottom of the window that keeps the dock
+/// open for as long as the mouse is anywhere in it.
 const HOVER_ZONE: f32 = 110.0;
+/// Frames of mouse stillness (about 2.5 s at 60 Hz) before the dock hides.
+const HIDE_AFTER_IDLE_FRAMES: u32 = 150;
 /// Fraction of the slide animation advanced per frame.
 const REVEAL_STEP: f32 = 0.18;
 const WHEEL_STEP: f32 = 0.05;
 
-const DOCK_WIDTH: i32 = 440;
+const DOCK_WIDTH: i32 = 615;
+const RESTART_SIZE: i32 = 38;
+const POWER_SIZE: i32 = 38;
+const POWER_COLOR: u32 = 0x00D9_3B3B;
+const POWER_SYMBOL_COLOR: u32 = 0x00FF_FFFF;
 const DOCK_HEIGHT: i32 = 60;
 const DOCK_MARGIN: i32 = 18;
 const ICON_SIZE: i32 = 30;
-const TRACK_WIDTH: i32 = 250;
+const TRACK_WIDTH: i32 = 55;
 const TRACK_HEIGHT: i32 = 8;
 const KNOB_RADIUS: i32 = 10;
+const SPEED_BUTTON_WIDTH: i32 = 58;
+const SPEED_BUTTON_HEIGHT: i32 = 34;
+const SPEED_BUTTON_GAP: i32 = 6;
+const DOCK_PADDING: i32 = 20;
 
 const DOCK_COLOR: u32 = 0x0020_2428;
 const DOCK_ALPHA: f32 = 0.88;
@@ -27,6 +41,40 @@ const KNOB_COLOR: u32 = 0x00F4_F6F8;
 const ICON_COLOR: u32 = 0x00F4_F6F8;
 const MUTE_SLASH_COLOR: u32 = 0x00FF_5A5A;
 
+/// How fast the fast-forward key runs the game.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpeedSetting {
+    X2,
+    X4,
+    X8,
+    /// As fast as the machine allows.
+    #[default]
+    Max,
+}
+
+impl SpeedSetting {
+    pub const ALL: [SpeedSetting; 4] = [Self::X2, Self::X4, Self::X8, Self::Max];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::X2 => "2X",
+            Self::X4 => "4X",
+            Self::X8 => "8X",
+            Self::Max => "MAX",
+        }
+    }
+
+    /// The target multiple of real time, or `None` for unthrottled.
+    pub fn multiple(self) -> Option<u32> {
+        match self {
+            Self::X2 => Some(2),
+            Self::X4 => Some(4),
+            Self::X8 => Some(8),
+            Self::Max => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pointer {
     /// Cursor position in window pixels, or `None` when outside the window.
@@ -34,32 +82,6 @@ pub struct Pointer {
     pub left_down: bool,
     /// Vertical wheel movement since the last frame (positive = up).
     pub scroll: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Rect {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-}
-
-impl Rect {
-    fn contains(&self, x: f32, y: f32) -> bool {
-        x >= self.x as f32
-            && x < (self.x + self.width) as f32
-            && y >= self.y as f32
-            && y < (self.y + self.height) as f32
-    }
-
-    fn inflated(&self, by: i32) -> Rect {
-        Rect {
-            x: self.x - by,
-            y: self.y - by,
-            width: self.width + by * 2,
-            height: self.height + by * 2,
-        }
-    }
 }
 
 /// Element rectangles for a fully revealed dock in a `width`×`height` window.
@@ -70,6 +92,13 @@ struct Layout {
     track: Rect,
     text_x: i32,
     text_y: i32,
+    /// Separator between the volume and speed sections.
+    divider_x: i32,
+    speed_buttons: [Rect; 4],
+    /// Separator after the power and restart buttons.
+    restart_divider_x: i32,
+    restart: Rect,
+    power: Rect,
 }
 
 impl Layout {
@@ -81,8 +110,22 @@ impl Layout {
             height: DOCK_HEIGHT,
         };
         let center_y = dock.y + DOCK_HEIGHT / 2;
+        // Left to right: power, restart, divider, then volume.
+        let power = Rect {
+            x: dock.x + DOCK_PADDING,
+            y: center_y - POWER_SIZE / 2,
+            width: POWER_SIZE,
+            height: POWER_SIZE,
+        };
+        let restart = Rect {
+            x: power.x + POWER_SIZE + 10,
+            y: center_y - RESTART_SIZE / 2,
+            width: RESTART_SIZE,
+            height: RESTART_SIZE,
+        };
+        let restart_divider_x = restart.x + RESTART_SIZE + 13;
         let icon = Rect {
-            x: dock.x + 20,
+            x: restart_divider_x + 16,
             y: center_y - ICON_SIZE / 2,
             width: ICON_SIZE,
             height: ICON_SIZE,
@@ -93,12 +136,25 @@ impl Layout {
             width: TRACK_WIDTH,
             height: TRACK_HEIGHT,
         };
+        let buttons_width = 4 * SPEED_BUTTON_WIDTH + 3 * SPEED_BUTTON_GAP;
+        let buttons_x = dock.x + DOCK_WIDTH - DOCK_PADDING - buttons_width;
+        let speed_buttons = std::array::from_fn(|index| Rect {
+            x: buttons_x + index as i32 * (SPEED_BUTTON_WIDTH + SPEED_BUTTON_GAP),
+            y: center_y - SPEED_BUTTON_HEIGHT / 2,
+            width: SPEED_BUTTON_WIDTH,
+            height: SPEED_BUTTON_HEIGHT,
+        });
         Self {
             dock,
             icon,
             track,
             text_x: track.x + TRACK_WIDTH + 26,
             text_y: center_y - (GLYPH_HEIGHT * TEXT_SCALE) / 2,
+            divider_x: buttons_x - 14,
+            speed_buttons,
+            restart_divider_x,
+            restart,
+            power,
         }
     }
 }
@@ -110,6 +166,11 @@ pub struct VolumeDock {
     reveal: f32,
     dragging: bool,
     was_down: bool,
+    speed: SpeedSetting,
+    last_position: Option<(f32, f32)>,
+    idle_frames: u32,
+    restart_requested: bool,
+    quit_requested: bool,
 }
 
 impl VolumeDock {
@@ -120,7 +181,27 @@ impl VolumeDock {
             reveal: 0.0,
             dragging: false,
             was_down: false,
+            speed: SpeedSetting::default(),
+            last_position: None,
+            idle_frames: HIDE_AFTER_IDLE_FRAMES,
+            restart_requested: false,
+            quit_requested: false,
         }
+    }
+
+    /// True once per click of the power button (the app should exit).
+    pub fn take_quit_request(&mut self) -> bool {
+        std::mem::take(&mut self.quit_requested)
+    }
+
+    /// True once per click of the restart button.
+    pub fn take_restart_request(&mut self) -> bool {
+        std::mem::take(&mut self.restart_requested)
+    }
+
+    /// The selected fast-forward speed.
+    pub fn speed(&self) -> SpeedSetting {
+        self.speed
     }
 
     #[cfg(test)]
@@ -152,10 +233,20 @@ impl VolumeDock {
     pub fn update(&mut self, pointer: Pointer, width: usize, height: usize) {
         let layout = Layout::new(width, height);
 
-        let hovering = pointer
+        // The dock follows the mouse: any movement over the window shows it,
+        // staying near the bottom keeps it, and stillness hides it again.
+        if pointer.position.is_some() && pointer.position != self.last_position {
+            self.idle_frames = 0;
+        } else {
+            self.idle_frames = self.idle_frames.saturating_add(1);
+        }
+        self.last_position = pointer.position;
+        let in_hover_zone = pointer
             .position
             .is_some_and(|(_, y)| y >= height as f32 - HOVER_ZONE);
-        let target = if hovering || self.dragging { 1.0 } else { 0.0 };
+        let active = pointer.position.is_some()
+            && (in_hover_zone || self.idle_frames < HIDE_AFTER_IDLE_FRAMES);
+        let target = if active || self.dragging { 1.0 } else { 0.0 };
         let delta: f32 = target - self.reveal;
         self.reveal = (self.reveal + delta.clamp(-REVEAL_STEP, REVEAL_STEP)).clamp(0.0, 1.0);
 
@@ -171,11 +262,21 @@ impl VolumeDock {
         }
         if let Some((x, y)) = pointer.position {
             if pressed {
-                if layout.icon.inflated(6).contains(x, y) {
+                if layout.power.contains(x, y) {
+                    self.quit_requested = true;
+                } else if layout.restart.contains(x, y) {
+                    self.restart_requested = true;
+                } else if layout.icon.inflated(6).contains(x, y) {
                     self.muted = !self.muted;
                 } else if layout.track.inflated(KNOB_RADIUS).contains(x, y) {
                     self.dragging = true;
                     self.muted = false;
+                } else if let Some(index) = layout
+                    .speed_buttons
+                    .iter()
+                    .position(|button| button.contains(x, y))
+                {
+                    self.speed = SpeedSetting::ALL[index];
                 }
             }
             if pointer.scroll != 0.0 && layout.dock.contains(x, y) {
@@ -199,12 +300,7 @@ impl VolumeDock {
         let layout = Layout::new(width, height);
         let eased = 1.0 - (1.0 - self.reveal).powi(3);
         let slide = ((1.0 - eased) * (DOCK_HEIGHT + DOCK_MARGIN) as f32).round() as i32;
-        let mut canvas = Canvas {
-            buffer,
-            width,
-            height,
-            offset_y: slide,
-        };
+        let mut canvas = Canvas::new(buffer, width, height, slide);
 
         canvas.rounded_rect(layout.dock, 14, DOCK_COLOR, DOCK_ALPHA);
 
@@ -262,133 +358,69 @@ impl VolumeDock {
             KNOB_COLOR,
         );
 
+        // Fast-forward speed selector.
+        canvas.rect(
+            layout.divider_x,
+            layout.dock.y + 14,
+            2,
+            DOCK_HEIGHT - 28,
+            TRACK_COLOR,
+        );
+        for (index, setting) in SpeedSetting::ALL.into_iter().enumerate() {
+            let button = layout.speed_buttons[index];
+            let selected = setting == self.speed;
+            let (fill, text) = if selected {
+                (FILL_COLOR, DOCK_COLOR)
+            } else {
+                (TRACK_COLOR, ICON_COLOR)
+            };
+            canvas.rounded_rect(button, 9, fill, if selected { 1.0 } else { 0.55 });
+            let label = setting.label();
+            let width = label.chars().count() as i32 * (GLYPH_WIDTH + 1) * TEXT_SCALE - TEXT_SCALE;
+            canvas.text(
+                label,
+                button.x + (button.width - width) / 2,
+                button.y + (button.height - GLYPH_HEIGHT * TEXT_SCALE) / 2,
+                text,
+            );
+        }
+
+        // Power (red) and restart (circular arrow), left of the volume.
+        canvas.rounded_rect(layout.power, 9, POWER_COLOR, 1.0);
+        canvas.power_symbol(
+            layout.power.x + layout.power.width / 2,
+            layout.power.y + layout.power.height / 2 + 2,
+            9,
+            POWER_SYMBOL_COLOR,
+        );
+        canvas.rect(
+            layout.restart_divider_x,
+            layout.dock.y + 14,
+            2,
+            DOCK_HEIGHT - 28,
+            TRACK_COLOR,
+        );
+        canvas.rounded_rect(layout.restart, 9, TRACK_COLOR, 0.55);
+        canvas.circular_arrow(
+            layout.restart.x + layout.restart.width / 2,
+            layout.restart.y + layout.restart.height / 2,
+            10,
+            ICON_COLOR,
+        );
+
         // Percentage.
         let percent = if self.muted {
             0
         } else {
             (self.volume * 100.0).round() as u32
         };
-        canvas.text(&format!("{percent}%"), layout.text_x, layout.text_y);
+        canvas.text(
+            &format!("{percent}%"),
+            layout.text_x,
+            layout.text_y,
+            ICON_COLOR,
+        );
     }
-}
-
-struct Canvas<'a> {
-    buffer: &'a mut [u32],
-    width: usize,
-    height: usize,
-    /// Extra downward shift used for the slide animation.
-    offset_y: i32,
-}
-
-impl Canvas<'_> {
-    fn blend(&mut self, x: i32, y: i32, color: u32, alpha: f32) {
-        let y = y + self.offset_y;
-        if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
-            return;
-        }
-        let pixel = &mut self.buffer[y as usize * self.width + x as usize];
-        if alpha >= 1.0 {
-            *pixel = color;
-            return;
-        }
-        let mix = |shift: u32| {
-            let dst = ((*pixel >> shift) & 0xFF) as f32;
-            let src = ((color >> shift) & 0xFF) as f32;
-            (dst + (src - dst) * alpha).round() as u32
-        };
-        *pixel = (mix(16) << 16) | (mix(8) << 8) | mix(0);
-    }
-
-    fn rect(&mut self, x: i32, y: i32, width: i32, height: i32, color: u32) {
-        for row in y..y + height {
-            for column in x..x + width {
-                self.blend(column, row, color, 1.0);
-            }
-        }
-    }
-
-    fn rounded_rect(&mut self, rect: Rect, radius: i32, color: u32, alpha: f32) {
-        let radius = radius.min(rect.width / 2).min(rect.height / 2);
-        for row in 0..rect.height {
-            for column in 0..rect.width {
-                // Distance outside the nearest corner circle, if any.
-                let dx = (radius - 1 - column)
-                    .max(column - (rect.width - radius))
-                    .max(0);
-                let dy = (radius - 1 - row).max(row - (rect.height - radius)).max(0);
-                if dx * dx + dy * dy <= radius * radius {
-                    self.blend(rect.x + column, rect.y + row, color, alpha);
-                }
-            }
-        }
-    }
-
-    fn circle(&mut self, cx: i32, cy: i32, radius: i32, color: u32) {
-        for dy in -radius..=radius {
-            for dx in -radius..=radius {
-                if dx * dx + dy * dy <= radius * radius {
-                    self.blend(cx + dx, cy + dy, color, 1.0);
-                }
-            }
-        }
-    }
-
-    /// Right-facing arc segment used for the speaker's sound waves.
-    fn arc(&mut self, cx: i32, cy: i32, radius: i32, color: u32) {
-        for dy in -radius..=radius {
-            for dx in 1..=radius {
-                let distance = ((dx * dx + dy * dy) as f32).sqrt();
-                // Keep a 55 degree wedge around the horizontal axis.
-                if (distance - radius as f32).abs() < 1.2 && dy.abs() as f32 <= distance * 0.82 {
-                    self.rect(cx + dx, cy + dy, 2, 2, color);
-                }
-            }
-        }
-    }
-
-    fn text(&mut self, text: &str, x: i32, y: i32) {
-        let mut cursor = x;
-        for character in text.chars() {
-            if let Some(glyph) = glyph(character) {
-                for (row, bits) in glyph.iter().enumerate() {
-                    for column in 0..GLYPH_WIDTH {
-                        if bits & (1 << (GLYPH_WIDTH - 1 - column)) != 0 {
-                            self.rect(
-                                cursor + column * TEXT_SCALE,
-                                y + row as i32 * TEXT_SCALE,
-                                TEXT_SCALE,
-                                TEXT_SCALE,
-                                ICON_COLOR,
-                            );
-                        }
-                    }
-                }
-            }
-            cursor += (GLYPH_WIDTH + 1) * TEXT_SCALE;
-        }
-    }
-}
-
-const GLYPH_WIDTH: i32 = 3;
-const GLYPH_HEIGHT: i32 = 5;
-const TEXT_SCALE: i32 = 3;
-
-/// 3x5 bitmap glyphs for digits and `%`, one byte per row (low 3 bits used).
-fn glyph(character: char) -> Option<[u8; 5]> {
-    Some(match character {
-        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
-        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
-        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
-        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
-        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
-        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
-        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
-        '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
-        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
-        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
-        '%' => [0b101, 0b001, 0b010, 0b100, 0b101],
-        _ => return None,
-    })
 }
 
 #[cfg(test)]
@@ -412,18 +444,134 @@ mod tests {
     }
 
     #[test]
-    fn dock_is_hidden_until_the_bottom_strip_is_hovered() {
+    fn dock_appears_when_the_mouse_moves_anywhere_and_hides_when_it_rests() {
         let mut dock = VolumeDock::new(0.5);
-        settle(&mut dock, hover(480.0, 200.0));
-        assert_eq!(dock.reveal(), 0.0);
-
-        settle(&mut dock, hover(480.0, H as f32 - 20.0));
-        assert_eq!(dock.reveal(), 1.0);
-
-        settle(&mut dock, hover(480.0, 200.0));
-        assert_eq!(dock.reveal(), 0.0);
+        // Never seen the mouse: hidden.
         settle(&mut dock, Pointer::default());
         assert_eq!(dock.reveal(), 0.0);
+
+        // Moving over the middle of the screen shows it.
+        for step in 0..20 {
+            dock.update(hover(300.0 + step as f32, 200.0), W, H);
+        }
+        assert_eq!(dock.reveal(), 1.0);
+
+        // A mouse that has stopped moving hides it after the idle delay.
+        for _ in 0..(HIDE_AFTER_IDLE_FRAMES + 30) {
+            dock.update(hover(320.0, 200.0), W, H);
+        }
+        assert_eq!(dock.reveal(), 0.0);
+
+        // Moving again brings it straight back.
+        dock.update(hover(330.0, 210.0), W, H);
+        for _ in 0..10 {
+            dock.update(hover(330.0, 210.0), W, H);
+        }
+        assert!(dock.reveal() > 0.9);
+    }
+
+    #[test]
+    fn a_continuously_moving_mouse_keeps_the_dock_open() {
+        let mut dock = VolumeDock::new(0.5);
+        for frame in 0..(HIDE_AFTER_IDLE_FRAMES * 3) {
+            dock.update(hover(100.0 + (frame % 200) as f32, 150.0), W, H);
+        }
+        assert_eq!(dock.reveal(), 1.0);
+    }
+
+    #[test]
+    fn resting_near_the_bottom_or_dragging_keeps_the_dock_open_and_leaving_hides_it() {
+        let mut dock = VolumeDock::new(0.5);
+        // Stationary inside the bottom strip: stays.
+        for _ in 0..(HIDE_AFTER_IDLE_FRAMES * 2) {
+            dock.update(hover(480.0, H as f32 - 20.0), W, H);
+        }
+        assert_eq!(dock.reveal(), 1.0);
+
+        // Leaving the window hides it immediately (animation aside).
+        settle(&mut dock, Pointer::default());
+        assert_eq!(dock.reveal(), 0.0);
+    }
+
+    #[test]
+    fn restart_button_requests_a_restart_once_per_click() {
+        let mut dock = VolumeDock::new(0.5);
+        settle(&mut dock, hover(480.0, H as f32 - 30.0));
+        let layout = Layout::new(W, H);
+        let (x, y) = (
+            layout.restart.x as f32 + 10.0,
+            layout.restart.y as f32 + 10.0,
+        );
+        assert!(!dock.take_restart_request());
+
+        let press = Pointer {
+            position: Some((x, y)),
+            left_down: true,
+            scroll: 0.0,
+        };
+        dock.update(press, W, H);
+        assert!(dock.take_restart_request());
+        // Holding the button does not fire again; neither does the release.
+        dock.update(press, W, H);
+        assert!(!dock.take_restart_request());
+        dock.update(hover(x, y), W, H);
+        assert!(!dock.take_restart_request());
+        // A second click does.
+        dock.update(press, W, H);
+        assert!(dock.take_restart_request());
+    }
+
+    #[test]
+    fn controls_are_ordered_power_restart_volume_speed_inside_the_dock() {
+        let layout = Layout::new(W, H);
+        let dock_left = layout.dock.x;
+        let dock_right = layout.dock.x + layout.dock.width;
+        assert!(layout.power.x >= dock_left);
+        assert!(layout.restart.x > layout.power.x + layout.power.width);
+        assert!(layout.restart_divider_x > layout.restart.x + layout.restart.width);
+        assert!(layout.icon.x > layout.restart_divider_x);
+        // Volume text, then the speed divider, then the four speed buttons.
+        let text_end = layout.text_x + 4 * (GLYPH_WIDTH + 1) * TEXT_SCALE;
+        assert!(text_end < layout.divider_x);
+        let first = layout.speed_buttons[0];
+        let last = layout.speed_buttons[3];
+        assert!(first.x > layout.divider_x);
+        assert!(last.x + last.width < dock_right);
+        assert!(dock_left >= 0 && dock_right <= W as i32);
+    }
+
+    #[test]
+    fn power_button_requests_quit_once_per_click_and_is_red() {
+        let mut dock = VolumeDock::new(0.5);
+        settle(&mut dock, hover(480.0, H as f32 - 30.0));
+        let layout = Layout::new(W, H);
+        let (x, y) = (layout.power.x as f32 + 10.0, layout.power.y as f32 + 10.0);
+        assert!(!dock.take_quit_request());
+
+        let press = Pointer {
+            position: Some((x, y)),
+            left_down: true,
+            scroll: 0.0,
+        };
+        dock.update(press, W, H);
+        assert!(dock.take_quit_request());
+        dock.update(press, W, H);
+        assert!(!dock.take_quit_request(), "holding does not repeat");
+        // The power click is not a restart click.
+        assert!(!dock.take_restart_request());
+
+        let mut buffer = vec![0u32; W * H];
+        dock.draw(&mut buffer, W, H);
+        let probe = (layout.power.y as usize + 6) * W + layout.power.x as usize + 6;
+        assert_eq!(buffer[probe], POWER_COLOR, "the button face is red");
+        // The white symbol is drawn on it.
+        let has_symbol = (0..layout.power.height as usize).any(|row| {
+            (0..layout.power.width as usize).any(|column| {
+                buffer[(layout.power.y as usize + row) * W + layout.power.x as usize + column]
+                    == POWER_SYMBOL_COLOR
+            })
+        });
+        assert!(has_symbol);
     }
 
     #[test]
@@ -541,5 +689,89 @@ mod tests {
         assert!(buffer.iter().any(|&p| p != 0x0010_2030));
         // Pixels well above the dock are unaffected.
         assert_eq!(buffer[50 * W + 50], 0x0010_2030);
+    }
+
+    #[test]
+    fn speed_defaults_to_max_and_clicking_a_button_selects_it() {
+        let mut dock = VolumeDock::new(0.5);
+        assert_eq!(dock.speed(), SpeedSetting::Max);
+        assert_eq!(dock.speed().multiple(), None);
+        settle(&mut dock, hover(480.0, H as f32 - 30.0));
+
+        let layout = Layout::new(W, H);
+        for (index, setting) in SpeedSetting::ALL.into_iter().enumerate() {
+            let button = layout.speed_buttons[index];
+            let click = Pointer {
+                position: Some((button.x as f32 + 10.0, button.y as f32 + 10.0)),
+                left_down: true,
+                scroll: 0.0,
+            };
+            dock.update(click, W, H);
+            assert_eq!(dock.speed(), setting);
+            // Release before the next click.
+            dock.update(hover(button.x as f32 + 10.0, button.y as f32 + 10.0), W, H);
+        }
+        assert_eq!(SpeedSetting::X2.multiple(), Some(2));
+        assert_eq!(SpeedSetting::X4.multiple(), Some(4));
+        assert_eq!(SpeedSetting::X8.multiple(), Some(8));
+    }
+
+    #[test]
+    fn speed_buttons_fit_inside_the_dock_without_overlapping_the_volume_controls() {
+        let layout = Layout::new(W, H);
+        let dock_right = layout.dock.x + layout.dock.width;
+        let mut previous_right = layout.divider_x;
+        for button in layout.speed_buttons {
+            assert!(
+                button.x > previous_right,
+                "buttons are ordered and separated"
+            );
+            previous_right = button.x + button.width;
+        }
+        assert!(previous_right < dock_right);
+        // The volume percentage text ends before the divider.
+        let text_end = layout.text_x + 4 * (GLYPH_WIDTH + 1) * TEXT_SCALE;
+        assert!(text_end < layout.divider_x);
+        assert!(layout.dock.x >= 0 && dock_right <= W as i32);
+    }
+
+    #[test]
+    fn selected_speed_is_highlighted_and_changing_volume_leaves_it_alone() {
+        let mut dock = VolumeDock::new(0.5);
+        settle(&mut dock, hover(480.0, H as f32 - 30.0));
+        let layout = Layout::new(W, H);
+        let button = layout.speed_buttons[1]; // 4X
+        dock.update(
+            Pointer {
+                position: Some((button.x as f32 + 5.0, button.y as f32 + 5.0)),
+                left_down: true,
+                scroll: 0.0,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dock.speed(), SpeedSetting::X4);
+
+        let mut buffer = vec![0u32; W * H];
+        dock.draw(&mut buffer, W, H);
+        let corner = |index: usize| {
+            let b = layout.speed_buttons[index];
+            buffer[(b.y as usize + 2) * W + b.x as usize + b.width as usize / 2]
+        };
+        assert_eq!(corner(1), FILL_COLOR, "selected button uses the accent");
+        assert_ne!(corner(0), FILL_COLOR);
+        assert_ne!(corner(3), FILL_COLOR);
+
+        // Scrolling the wheel changes volume only.
+        dock.update(
+            Pointer {
+                position: Some((layout.dock.x as f32 + 100.0, layout.dock.y as f32 + 30.0)),
+                left_down: false,
+                scroll: 1.0,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dock.speed(), SpeedSetting::X4);
     }
 }

@@ -1,5 +1,7 @@
 mod audio_output;
+mod draw;
 mod frontend;
+mod hud;
 mod volume_dock;
 
 use gba_emulator::library::{InstallOutcome, LIBRARY_ENV, Library, sibling_save_path};

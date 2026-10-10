@@ -7,3 +7,14 @@ edition = "2024"
 cpal = "0.18.2"
 memmap2 = "0.9.11"
 minifb = "0.27"
+
+[profile.release]
+# The emulator core is a tight interpreter loop spread over several modules;
+# whole-program optimisation lets it inline across them.
+lto = "fat"
+codegen-units = 1
+# Do NOT set `panic = "abort"` here. With rustc 1.92 on aarch64-apple-darwin,
+# fat LTO + one codegen unit + panic=abort miscompiled the dock's pixel
+# addressing (`y * 960`) into an invalid `ubfx` encoding, so the app died with
+# SIGILL a few frames after the window opened. `scripts/check_codegen.sh`
+# scans a release binary for undecodable instructions.

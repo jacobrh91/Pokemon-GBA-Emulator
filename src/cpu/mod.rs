@@ -21,10 +21,17 @@ pub struct Cpu {
     banked_modes: [[u32; 2]; 5],
     saved_status: [u32; 5],
     sequential_fetch: Option<(u32, bool)>,
+    /// Wait states accumulated by the data accesses of the instruction
+    /// being executed.
+    data_wait: u32,
     /// Set by BIOS Halt/IntrWait; the system owner idles until an interrupt.
     pub halted: bool,
     intr_waiting: bool,
 }
+
+/// Upper bound on the cycles one instruction can take (a 16-word block
+/// transfer with maximum wait states fits well within this).
+const MAX_INSTRUCTION_CYCLES: u64 = 4096;
 
 const N_FLAG: u32 = 1 << 31;
 const Z_FLAG: u32 = 1 << 30;
@@ -63,6 +70,7 @@ impl Default for Cpu {
             banked_modes: [[0; 2]; 5],
             saved_status: [0; 5],
             sequential_fetch: None,
+            data_wait: 0,
             halted: false,
             intr_waiting: false,
         }
@@ -370,20 +378,69 @@ fn is_memory_fault(error: &io::Error) -> bool {
     )
 }
 
-fn add_data_wait_cycles(
-    mut wait_cycles: u32,
-    bus: &MemoryBus,
-    accesses: &[(u32, u8)],
-) -> io::Result<u32> {
-    for (index, (address, width)) in accesses.iter().copied().enumerate() {
-        wait_cycles = wait_cycles
-            .checked_add(
-                bus.transfer_cycles(address, width, index != 0)?
-                    .saturating_sub(1),
-            )
-            .ok_or_else(|| io::Error::other("bus wait-state cycle count overflow"))?;
+/// The data-bus accesses of one instruction. Most instructions have none or
+/// one, so this is an enum rather than a buffer: timing never allocates or
+/// zero-fills anything.
+enum DataAccesses {
+    None,
+    One(u32, u8),
+    Two((u32, u8), (u32, u8)),
+    /// `count` consecutive word accesses (a block transfer), capped at 16.
+    Words {
+        start: u32,
+        count: u32,
+    },
+}
+
+impl DataAccesses {
+    const fn none() -> Self {
+        Self::None
     }
-    Ok(wait_cycles)
+
+    fn one(address: u32, width: u8) -> Self {
+        Self::One(address, width)
+    }
+
+    fn two(first: (u32, u8), second: (u32, u8)) -> Self {
+        Self::Two(first, second)
+    }
+
+    fn words(start: u32, count: u32) -> Self {
+        Self::Words {
+            start,
+            count: count.min(16),
+        }
+    }
+}
+
+fn add_data_wait_cycles(
+    wait_cycles: u32,
+    bus: &MemoryBus,
+    accesses: &DataAccesses,
+) -> io::Result<u32> {
+    // Wait states are the cost beyond the single cycle the base count includes.
+    let extra = |address: u32, width: u8, sequential: bool| -> io::Result<u32> {
+        Ok(bus
+            .transfer_cycles(address, width, sequential)?
+            .saturating_sub(1))
+    };
+    let total = match *accesses {
+        DataAccesses::None => 0,
+        DataAccesses::One(address, width) => extra(address, width, false)?,
+        DataAccesses::Two(first, second) => {
+            extra(first.0, first.1, false)? + extra(second.0, second.1, true)?
+        }
+        DataAccesses::Words { start, count } => {
+            let mut total = 0;
+            for index in 0..count {
+                total += extra(start.wrapping_add(index * 4), 4, index != 0)?;
+            }
+            total
+        }
+    };
+    wait_cycles
+        .checked_add(total)
+        .ok_or_else(|| io::Error::other("bus wait-state cycle count overflow"))
 }
 
 fn valid_mode(mode: u32) -> bool {

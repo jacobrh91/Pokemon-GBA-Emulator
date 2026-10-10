@@ -1,4 +1,5 @@
 use memmap2::Mmap;
+use std::cell::Cell;
 use std::fs::File;
 use std::io;
 
@@ -53,12 +54,30 @@ const CYCLES_PER_FRAME: u32 = CYCLES_PER_SCANLINE * TOTAL_SCANLINES;
 #[derive(Clone)]
 pub struct ScanlineSnapshot {
     pub line: usize,
+    /// BG2/BG3 reference point (X/Y) registers written since the previous
+    /// snapshot; the PPU reloads its internal reference from them.
+    pub affine_reload: [bool; 2],
     pub registers: [u8; DISPLAY_REGISTER_BYTES],
 }
 
 pub const DISPLAY_REGISTER_BYTES: usize = 0x60;
 /// Snapshots queued without a consumer are dropped past this many.
 const MAX_QUEUED_SCANLINES: usize = 512;
+
+/// Game Pak access cycles from WAITCNT: `([[non-sequential, sequential];
+/// 3 wait states], SRAM cycles)`.
+fn decode_waitcnt(waitcnt: u16) -> ([[u32; 2]; 3], u32) {
+    const FIRST_ACCESS: [u32; 4] = [4, 3, 2, 8];
+    // Sequential cycles: [WS0, WS1, WS2] each pick between two settings.
+    const SEQUENTIAL: [[u32; 2]; 3] = [[2, 1], [4, 1], [8, 1]];
+    let mut rom = [[0; 2]; 3];
+    for wait_state in 0..3 {
+        let first = FIRST_ACCESS[usize::from((waitcnt >> [2, 5, 8][wait_state]) & 3)];
+        let sequential_bit = usize::from((waitcnt >> [4, 7, 10][wait_state]) & 1);
+        rom[wait_state] = [first, SEQUENTIAL[wait_state][sequential_bit]];
+    }
+    (rom, FIRST_ACCESS[usize::from(waitcnt & 3)])
+}
 
 #[derive(Default)]
 struct Timer {
@@ -97,6 +116,29 @@ pub struct MemoryBus {
     pressed_buttons: u16,
     keypad_irq_active: bool,
     display_cycles: u32,
+    /// Cycles the CPU has run that the display, timers and audio have not
+    /// been told about yet. Always shorter than `cycles_until_event`, so no
+    /// observable event hides inside it.
+    pending_cycles: u32,
+    /// Bus writes performed so far; lets the emulator prove a loop has no
+    /// side effects.
+    write_count: u64,
+    /// Times pending time was applied (events and register writes). An
+    /// iteration of a loop is only side-effect free if none happened in it.
+    flush_count: u64,
+    /// Reads of registers whose value changes with every cycle (timer
+    /// counters); a loop that reads one is waiting on time, not an event.
+    volatile_reads: Cell<u32>,
+    /// Cycles from the last flush until the next scanline/HBlank boundary,
+    /// timer overflow or audio sample.
+    cycles_until_event: u32,
+    /// Decoded WAITCNT: cycles per 16-bit Game Pak access, indexed by
+    /// `[wait state 0..=2][sequential]`, and for SRAM/Flash.
+    rom_cycles: [[u32; 2]; 3],
+    /// Mask applied to Game Pak offsets: the ROM mirrors when its size is a
+    /// power of two, otherwise the full 25-bit window is addressable.
+    rom_mask: usize,
+    sram_cycles: u32,
     timers: [Timer; 4],
     dma: [DmaChannel; 4],
     dma_cycles: u32,
@@ -104,6 +146,7 @@ pub struct MemoryBus {
     /// Last value the CPU fetched; unmapped reads return it.
     open_bus: u32,
     scanlines: Vec<ScanlineSnapshot>,
+    affine_reload: [bool; 2],
     /// Last BIOS opcode fetched, returned for BIOS reads from outside it.
     bios_open_bus: u32,
 }
@@ -120,6 +163,11 @@ impl MemoryBus {
         io_regs[SOUNDBIAS + 1] = SOUNDBIAS_DEFAULT_HIGH;
 
         let savedata = Savedata::detect(&rom);
+        let rom_mask = if rom.len().is_power_of_two() {
+            rom.len() - 1
+        } else {
+            usize::MAX
+        };
 
         Ok(Self {
             rom,
@@ -133,12 +181,21 @@ impl MemoryBus {
             pressed_buttons: 0,
             keypad_irq_active: false,
             display_cycles: 0,
+            pending_cycles: 0,
+            write_count: 0,
+            flush_count: 0,
+            volatile_reads: Cell::new(0),
+            cycles_until_event: HBLANK_START_CYCLES,
+            rom_cycles: decode_waitcnt(0).0,
+            rom_mask,
+            sram_cycles: decode_waitcnt(0).1,
             timers: std::array::from_fn(|_| Timer::default()),
             dma: [DmaChannel::default(); 4],
             dma_cycles: 0,
             apu: Apu::default(),
             open_bus: 0,
             scanlines: Vec::new(),
+            affine_reload: [false; 2],
             bios_open_bus: BIOS_OPEN_BUS_RESET,
         })
     }
@@ -162,10 +219,94 @@ impl MemoryBus {
         }
     }
 
+    /// `length` bytes starting at `offset` of a plain (side-effect free)
+    /// memory region, or `None` for I/O, backup, open bus or an access that
+    /// would run off the end of the region's storage.
+    #[inline]
+    fn plain_bytes(&self, region: Region, length: usize) -> Option<&[u8]> {
+        let (storage, offset): (&[u8], usize) = match region {
+            Region::Rom(offset) => (&self.rom[..], offset),
+            Region::Ewram(offset) => (&self.ewram[..], offset),
+            Region::Iwram(offset) => (&self.iwram[..], offset),
+            Region::PaletteRam(offset) => (&self.palette_ram[..], offset),
+            Region::Vram(offset) => (&self.vram[..], offset),
+            Region::Oam(offset) => (&self.oam[..], offset),
+            _ => return None,
+        };
+        storage.get(offset..offset.checked_add(length)?)
+    }
+
+    /// Mutable counterpart of [`Self::plain_bytes`] for writable regions.
+    #[inline]
+    fn plain_bytes_mut(&mut self, region: Region, length: usize) -> Option<&mut [u8]> {
+        let (storage, offset): (&mut [u8], usize) = match region {
+            Region::Ewram(offset) => (&mut self.ewram[..], offset),
+            Region::Iwram(offset) => (&mut self.iwram[..], offset),
+            Region::PaletteRam(offset) => (&mut self.palette_ram[..], offset),
+            Region::Vram(offset) => (&mut self.vram[..], offset),
+            Region::Oam(offset) => (&mut self.oam[..], offset),
+            _ => return None,
+        };
+        storage.get_mut(offset..offset.checked_add(length)?)
+    }
+
+    /// Instruction fetch for the common cases (ROM, IWRAM, EWRAM), falling
+    /// back to a normal read for everything else.
+    #[inline]
+    pub fn fetch_u16(&self, address: u32) -> io::Result<u16> {
+        let bytes = match address >> 24 {
+            0x08..=0x0D => {
+                let offset = (address & 0x01FF_FFFF) as usize & self.rom_mask;
+                self.rom.get(offset..offset + 2)
+            }
+            0x03 => {
+                let offset = (address & IWRAM_MASK) as usize;
+                self.iwram.get(offset..offset + 2)
+            }
+            0x02 => {
+                let offset = (address & EWRAM_MASK) as usize;
+                self.ewram.get(offset..offset + 2)
+            }
+            _ => None,
+        };
+        match bytes {
+            Some(bytes) => Ok(u16::from_le_bytes([bytes[0], bytes[1]])),
+            None => self.read_u16(address),
+        }
+    }
+
+    /// 32-bit counterpart of [`Self::fetch_u16`].
+    #[inline]
+    pub fn fetch_u32(&self, address: u32) -> io::Result<u32> {
+        let bytes = match address >> 24 {
+            0x08..=0x0D => {
+                let offset = (address & 0x01FF_FFFF) as usize & self.rom_mask;
+                self.rom.get(offset..offset + 4)
+            }
+            0x03 => {
+                let offset = (address & IWRAM_MASK) as usize;
+                self.iwram.get(offset..offset + 4)
+            }
+            0x02 => {
+                let offset = (address & EWRAM_MASK) as usize;
+                self.ewram.get(offset..offset + 4)
+            }
+            _ => None,
+        };
+        match bytes {
+            Some(bytes) => Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
+            None => self.read_u32(address),
+        }
+    }
+
     pub fn read_u16(&self, address: u32) -> io::Result<u16> {
+        let region = self.resolve(address)?;
+        if let Some(bytes) = self.plain_bytes(region, 2) {
+            return Ok(u16::from_le_bytes([bytes[0], bytes[1]]));
+        }
         // The backup chip sits on an 8-bit bus: wider reads see the byte
         // repeated on every lane.
-        if matches!(self.resolve(address)?, Region::SaveRam(_)) {
+        if matches!(region, Region::SaveRam(_)) {
             return Ok(u16::from(self.read_u8(address)?) * 0x0101);
         }
         let low = self.read_u8(address)?;
@@ -180,7 +321,11 @@ impl MemoryBus {
     }
 
     pub fn read_u32(&self, address: u32) -> io::Result<u32> {
-        if matches!(self.resolve(address)?, Region::SaveRam(_)) {
+        let region = self.resolve(address)?;
+        if let Some(bytes) = self.plain_bytes(region, 4) {
+            return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
+        if matches!(region, Region::SaveRam(_)) {
             return Ok(u32::from(self.read_u8(address)?) * 0x0101_0101);
         }
         let mut bytes = [0; 4];
@@ -197,6 +342,7 @@ impl MemoryBus {
     }
 
     pub fn write_u8(&mut self, address: u32, value: u8) -> io::Result<()> {
+        self.write_count += 1;
         if (ROM_START..=ROM_END).contains(&address) {
             return Ok(());
         }
@@ -205,10 +351,16 @@ impl MemoryBus {
     }
 
     pub fn write_u16(&mut self, address: u32, value: u16) -> io::Result<()> {
+        self.write_count += 1;
         if (ROM_START..=ROM_END).contains(&address) {
             return Ok(());
         }
-        if let Region::SaveRam(offset) = self.resolve(address)? {
+        let first = self.resolve(address)?;
+        if let Some(bytes) = self.plain_bytes_mut(first, 2) {
+            bytes.copy_from_slice(&value.to_le_bytes());
+            return Ok(());
+        }
+        if let Region::SaveRam(offset) = first {
             // Only one byte reaches the 8-bit chip: the lane being addressed.
             self.savedata
                 .write(offset as u32, (value >> ((address & 1) * 8)) as u8);
@@ -234,62 +386,40 @@ impl MemoryBus {
         Ok(())
     }
 
-    pub fn transfer_cycles(&self, address: u32, width: u8, sequential: bool) -> io::Result<u32> {
-        let region = self.resolve(address)?;
-        let halfword_cycles = match region {
-            Region::Bios
-            | Region::OpenBus
-            | Region::Iwram(_)
-            | Region::Io(_)
-            | Region::PaletteRam(_)
-            | Region::Vram(_)
-            | Region::Oam(_) => 1,
-            Region::Ewram(_) => 3,
-            Region::SaveRam(_) => {
-                let waitcnt = u16::from_le_bytes([self.io_regs[0x204], self.io_regs[0x205]]);
-                [4, 3, 2, 8][(waitcnt & 0x3) as usize]
-            }
-            Region::Rom(_) => {
-                let waitcnt = u16::from_le_bytes([self.io_regs[0x204], self.io_regs[0x205]]);
-                let wait_state = match address {
-                    0x0800_0000..=0x09FF_FFFF => 0,
-                    0x0A00_0000..=0x0BFF_FFFF => 1,
+    /// Cycles for a 16-bit (or 8-bit) access at `address`; 32-bit accesses
+    /// are two of these. Mirrors the region map in [`Self::resolve`].
+    #[inline]
+    fn halfword_cycles(&self, address: u32, sequential: bool) -> u32 {
+        match address >> 24 {
+            // EWRAM sits on a 16-bit bus with 2 wait states.
+            0x02 => 3,
+            // Game Pak ROM wait-state windows.
+            0x08..=0x0D => {
+                let wait_state = match address >> 24 {
+                    0x08 | 0x09 => 0,
+                    0x0A | 0x0B => 1,
                     _ => 2,
                 };
-                let first_bit = [2, 5, 8][wait_state];
-                let sequential_bit = [4, 7, 10][wait_state];
-                if sequential {
-                    let selected = (waitcnt >> sequential_bit) & 1 != 0;
-                    match wait_state {
-                        0 => [2, 1][usize::from(selected)],
-                        1 => [4, 1][usize::from(selected)],
-                        _ => [8, 1][usize::from(selected)],
-                    }
-                } else {
-                    let selection = ((waitcnt >> first_bit) & 3) as usize;
-                    [4, 3, 2, 8][selection]
-                }
+                self.rom_cycles[wait_state][usize::from(sequential)]
             }
-        };
-        Ok(match width {
-            1 | 2 => halfword_cycles,
-            4 if matches!(region, Region::Iwram(_)) => 1,
-            4 => {
-                let second_address = address.checked_add(2).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::AddrNotAvailable,
-                        "word access address overflow",
-                    )
-                })?;
-                halfword_cycles + self.transfer_cycles(second_address, 2, true)?
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unsupported bus access width: {width}"),
-                ));
-            }
-        })
+            0x0E => self.sram_cycles,
+            // BIOS, IWRAM, I/O, palette, VRAM, OAM and open bus.
+            _ => 1,
+        }
+    }
+
+    pub fn transfer_cycles(&self, address: u32, width: u8, sequential: bool) -> io::Result<u32> {
+        match width {
+            1 | 2 => Ok(self.halfword_cycles(address, sequential)),
+            // BIOS, IWRAM, I/O and OAM are on 32-bit buses: a word is one access.
+            4 if matches!(address >> 24, 0x00 | 0x03 | 0x04 | 0x07) => Ok(1),
+            4 => Ok(self.halfword_cycles(address, sequential)
+                + self.halfword_cycles(address.wrapping_add(2), true)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unsupported bus access width: {width}"),
+            )),
+        }
     }
 
     /// True when any enabled interrupt source is requested (`IE & IF`),
@@ -310,7 +440,97 @@ impl MemoryBus {
         self.io_regs[INTERRUPT_MASTER_ENABLE] & 1 != 0 && self.interrupt_requested()
     }
 
+    /// Accounts `cycles` of CPU time. The work (display events, timers,
+    /// audio) is deferred until something observable is due; register reads
+    /// that depend on time compute their value from the pending cycles.
     pub fn advance(&mut self, cycles: u32) {
+        self.pending_cycles = self.pending_cycles.saturating_add(cycles);
+        if self.pending_cycles >= self.cycles_until_event {
+            self.flush_pending();
+        }
+    }
+
+    /// Brings the display, timers and audio up to date. Needed before
+    /// anything inspects their internal state directly.
+    pub fn sync(&mut self) {
+        self.flush_pending();
+    }
+
+    fn flush_pending(&mut self) {
+        let elapsed = std::mem::take(&mut self.pending_cycles);
+        if elapsed != 0 {
+            self.flush_count += 1;
+            self.advance_elapsed(elapsed);
+            self.reschedule();
+        }
+    }
+
+    /// Recomputes how long the bus can run before something observable
+    /// happens: a scanline start or HBlank, a timer overflow, or a sample.
+    fn reschedule(&mut self) {
+        let in_line = self.display_cycles % CYCLES_PER_SCANLINE;
+        let mut distance = if in_line < HBLANK_START_CYCLES {
+            HBLANK_START_CYCLES - in_line
+        } else {
+            CYCLES_PER_SCANLINE - in_line
+        };
+        distance = distance.min(self.apu.cycles_until_sample());
+        for (index, timer) in self.timers.iter().enumerate() {
+            let counting = timer.control & (1 << 7) != 0;
+            let cascaded = index > 0 && timer.control & (1 << 2) != 0;
+            if counting && !cascaded {
+                let shift = [0_u32, 6, 8, 10][(timer.control & 3) as usize];
+                let ticks = 0x1_0000 - u64::from(timer.counter);
+                let cycles = (ticks << shift) - u64::from(timer.prescaler_cycles);
+                distance = distance.min(cycles.min(u64::from(u32::MAX)) as u32);
+            }
+        }
+        self.cycles_until_event = distance.max(1);
+    }
+
+    /// Bus writes so far, for loop-invariance checks.
+    pub fn write_count(&self) -> u64 {
+        self.write_count
+    }
+
+    /// Time-application events so far (scanline/timer/audio events and
+    /// register writes).
+    pub fn flush_count(&self) -> u64 {
+        self.flush_count
+    }
+
+    /// Reads of per-cycle-varying registers so far.
+    pub fn volatile_read_count(&self) -> u32 {
+        self.volatile_reads.get()
+    }
+
+    /// Cycles the CPU can still run before anything observable happens
+    /// (a scanline or HBlank, a timer overflow, an audio sample). Time can
+    /// be advanced by less than this without any event occurring.
+    pub fn cycles_until_next_event(&self) -> u32 {
+        self.cycles_until_event.saturating_sub(self.pending_cycles)
+    }
+
+    /// The display position including cycles not yet flushed.
+    fn live_display_cycles(&self) -> u32 {
+        self.display_cycles + self.pending_cycles
+    }
+
+    /// A timer's counter as the CPU would read it right now.
+    fn live_timer_counter(&self, index: usize) -> u16 {
+        let timer = &self.timers[index];
+        let counting = timer.control & (1 << 7) != 0;
+        let cascaded = index > 0 && timer.control & (1 << 2) != 0;
+        if !counting || cascaded {
+            return timer.counter;
+        }
+        let shift = [0_u32, 6, 8, 10][(timer.control & 3) as usize];
+        let ticks = (u64::from(timer.prescaler_cycles) + u64::from(self.pending_cycles)) >> shift;
+        timer.counter.wrapping_add(ticks as u16)
+    }
+
+    /// Applies `cycles` of elapsed time to the display, timers and audio.
+    fn advance_elapsed(&mut self, cycles: u32) {
         self.display_events(cycles);
         self.display_cycles = ((u64::from(self.display_cycles) + u64::from(cycles))
             % u64::from(CYCLES_PER_FRAME)) as u32;
@@ -331,10 +551,11 @@ impl MemoryBus {
                 }
                 continue;
             }
-            let prescaler = [1_u64, 64, 256, 1024][(control & 3) as usize];
+            // Prescalers are 1, 64, 256 and 1024 cycles: shifts, not divides.
+            let shift = [0_u32, 6, 8, 10][(control & 3) as usize];
             let accumulated = u64::from(self.timers[index].prescaler_cycles) + u64::from(cycles);
-            let ticks = accumulated / prescaler;
-            self.timers[index].prescaler_cycles = (accumulated % prescaler) as u16;
+            let ticks = accumulated >> shift;
+            self.timers[index].prescaler_cycles = (accumulated & ((1 << shift) - 1)) as u16;
             cascade_ticks = self.advance_timer(index, ticks);
             if index < 2 {
                 audio_overflows[index] = cascade_ticks;
@@ -402,6 +623,7 @@ impl MemoryBus {
                         registers.copy_from_slice(&self.io_regs[..DISPLAY_REGISTER_BYTES]);
                         self.scanlines.push(ScanlineSnapshot {
                             line: line as usize,
+                            affine_reload: std::mem::take(&mut self.affine_reload),
                             registers,
                         });
                     }
@@ -440,6 +662,12 @@ impl MemoryBus {
         self.bios_open_bus = value;
     }
 
+    /// True if [`Self::take_scanlines`] would return something.
+    #[inline]
+    pub fn has_scanlines(&self) -> bool {
+        !self.scanlines.is_empty()
+    }
+
     /// Scanlines that finished drawing since the last call, oldest first.
     pub fn take_scanlines(&mut self) -> Vec<ScanlineSnapshot> {
         std::mem::take(&mut self.scanlines)
@@ -471,6 +699,7 @@ impl MemoryBus {
     }
 
     pub fn register_ram_reset(&mut self, flags: u32) {
+        self.flush_pending();
         if flags & 1 != 0 {
             self.ewram.fill(0);
         }
@@ -491,16 +720,24 @@ impl MemoryBus {
             self.io_regs.fill(0);
             self.io_regs[DISPCNT] = DISPCNT_FORCED_BLANK;
             self.io_regs[SOUNDBIAS + 1] = SOUNDBIAS_DEFAULT_HIGH;
+            self.refresh_waitcnt();
             self.timers = std::array::from_fn(|_| Timer::default());
             self.dma = [DmaChannel::default(); 4];
+            self.reschedule();
         }
     }
 
     pub fn write_u32(&mut self, address: u32, value: u32) -> io::Result<()> {
+        self.write_count += 1;
         if (ROM_START..=ROM_END).contains(&address) {
             return Ok(());
         }
-        if let Region::SaveRam(offset) = self.resolve(address)? {
+        let first = self.resolve(address)?;
+        if let Some(bytes) = self.plain_bytes_mut(first, 4) {
+            bytes.copy_from_slice(&value.to_le_bytes());
+            return Ok(());
+        }
+        if let Region::SaveRam(offset) = first {
             self.savedata
                 .write(offset as u32, (value >> ((address & 3) * 8)) as u8);
             return Ok(());
@@ -546,13 +783,9 @@ impl MemoryBus {
             }
             OAM_START..=0x07FF_FFFF => Ok(Region::Oam((address & 0x3FF) as usize)),
             0x0E00_0000..=0x0EFF_FFFF => Ok(Region::SaveRam((address & 0xFFFF) as usize)),
-            ROM_START..=ROM_END => {
-                let mut offset = (address & 0x01FF_FFFF) as usize;
-                if self.rom.len().is_power_of_two() {
-                    offset &= self.rom.len() - 1;
-                }
-                Ok(Region::Rom(offset))
-            }
+            ROM_START..=ROM_END => Ok(Region::Rom(
+                (address & 0x01FF_FFFF) as usize & self.rom_mask,
+            )),
             0x0000_0000..=0x0000_3FFF => Ok(Region::Bios),
             _ => Ok(Region::OpenBus),
         }
@@ -567,6 +800,8 @@ impl MemoryBus {
             Region::Oam(offset) => self.oam[offset] = value,
             Region::SaveRam(offset) => self.savedata.write(offset as u32, value),
             Region::Io(offset) => {
+                // A register write must see (and be seen at) the right time.
+                self.flush_pending();
                 if (apu::FIFO_A..apu::FIFO_A + 8).contains(&offset) {
                     self.apu.push_fifo((offset - apu::FIFO_A) / 4, value);
                     return Ok(());
@@ -587,7 +822,18 @@ impl MemoryBus {
                     self.io_regs[offset] = value;
                 }
                 self.update_timer_register(offset);
+                if (TIMER_BASE..TIMER_BASE + 16).contains(&offset) {
+                    self.reschedule();
+                }
+                if (0x204..0x206).contains(&offset) {
+                    self.refresh_waitcnt();
+                }
                 self.dma_register_written(offset);
+                match offset {
+                    0x28..=0x2F => self.affine_reload[0] = true,
+                    0x38..=0x3F => self.affine_reload[1] = true,
+                    _ => {}
+                }
                 if (KEYCNT..KEYCNT + 2).contains(&offset) {
                     self.evaluate_keypad_irq();
                 }
@@ -602,8 +848,9 @@ impl MemoryBus {
 
     fn read_io_byte(&self, offset: usize) -> u8 {
         if offset == DISPSTAT {
-            let scanline = self.display_cycles / CYCLES_PER_SCANLINE;
-            let in_hblank = self.display_cycles % CYCLES_PER_SCANLINE >= HBLANK_START_CYCLES;
+            let position = self.live_display_cycles();
+            let scanline = position / CYCLES_PER_SCANLINE;
+            let in_hblank = position % CYCLES_PER_SCANLINE >= HBLANK_START_CYCLES;
             let in_vblank = (VBLANK_START_SCANLINE..TOTAL_SCANLINES - 1).contains(&scanline);
             let lyc = u32::from(self.io_regs[DISPSTAT + 1]);
             return (self.io_regs[offset] & !7)
@@ -626,7 +873,7 @@ impl MemoryBus {
             return (self.io_regs[offset] & 0x80) | self.apu.channel_status();
         }
         if offset == VCOUNT {
-            return (self.display_cycles / CYCLES_PER_SCANLINE) as u8;
+            return (self.live_display_cycles() / CYCLES_PER_SCANLINE) as u8;
         }
         if offset == VCOUNT + 1 {
             return 0;
@@ -642,7 +889,9 @@ impl MemoryBus {
             let timer_index = (offset - TIMER_BASE) / 4;
             let timer_register_offset = (offset - TIMER_BASE) % 4;
             if timer_register_offset < 2 {
-                let counter = self.timers[timer_index].counter;
+                self.volatile_reads
+                    .set(self.volatile_reads.get().wrapping_add(1));
+                let counter = self.live_timer_counter(timer_index);
                 return if timer_register_offset == 0 {
                     counter as u8
                 } else {
@@ -651,6 +900,12 @@ impl MemoryBus {
             }
         }
         self.io_regs[offset]
+    }
+
+    /// Re-derives the cached Game Pak timings after WAITCNT changed.
+    fn refresh_waitcnt(&mut self) {
+        let waitcnt = u16::from_le_bytes([self.io_regs[0x204], self.io_regs[0x205]]);
+        (self.rom_cycles, self.sram_cycles) = decode_waitcnt(waitcnt);
     }
 
     fn update_timer_register(&mut self, offset: usize) {
@@ -950,14 +1205,20 @@ mod tests {
         let mut bus = bus_with_rom(&[0; 4]);
         assert_eq!(bus.transfer_cycles(EWRAM_START, 2, false).unwrap(), 3);
         assert_eq!(bus.transfer_cycles(IWRAM_START, 4, false).unwrap(), 1);
+        // 32-bit buses: BIOS, I/O and OAM words are single accesses; 16-bit
+        // palette RAM and VRAM take two.
+        assert_eq!(bus.transfer_cycles(0, 4, false).unwrap(), 1);
+        assert_eq!(bus.transfer_cycles(IO_REG_START, 4, false).unwrap(), 1);
+        assert_eq!(bus.transfer_cycles(OAM_START, 4, false).unwrap(), 1);
+        assert_eq!(bus.transfer_cycles(PALETTE_RAM_START, 4, false).unwrap(), 2);
+        assert_eq!(bus.transfer_cycles(VRAM_START, 4, false).unwrap(), 2);
         assert_eq!(bus.transfer_cycles(ROM_START, 2, false).unwrap(), 4);
         assert_eq!(bus.transfer_cycles(ROM_START, 2, true).unwrap(), 2);
 
         assert_eq!(bus.transfer_cycles(0x0A00_0000, 2, true).unwrap(), 4);
         assert_eq!(bus.transfer_cycles(0x0C00_0000, 2, true).unwrap(), 8);
 
-        bus.io_regs[0x204] = 0x9C;
-        bus.io_regs[0x205] = 0x04;
+        bus.write_u16(IO_REG_START + 0x204, 0x049C).unwrap();
         assert_eq!(bus.transfer_cycles(ROM_START, 2, false).unwrap(), 8);
         assert_eq!(bus.transfer_cycles(ROM_START, 2, true).unwrap(), 1);
         assert_eq!(bus.transfer_cycles(0x0A00_0000, 2, true).unwrap(), 1);
@@ -1272,5 +1533,28 @@ mod tests {
         bus.write_u16(0x0E00_0021, 0x7766).unwrap();
         assert_eq!(bus.read_u8(0x0E00_0021).unwrap(), 0x77);
         assert_eq!(bus.read_u8(0x0E00_0020).unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn waitcnt_writes_and_resets_refresh_the_cached_game_pak_timings() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        assert_eq!(bus.transfer_cycles(ROM_START, 2, false).unwrap(), 4);
+
+        // WS0 first access = 2 cycles (selection 2); sequential = 1 (bit 4).
+        bus.write_u16(IO_REG_START + 0x204, (2 << 2) | (1 << 4))
+            .unwrap();
+        assert_eq!(bus.transfer_cycles(ROM_START, 2, false).unwrap(), 2);
+        assert_eq!(bus.transfer_cycles(ROM_START, 2, true).unwrap(), 1);
+        // A word is non-sequential + sequential halfwords.
+        assert_eq!(bus.transfer_cycles(ROM_START, 4, false).unwrap(), 3);
+
+        // SRAM wait = 8 cycles for selection 3.
+        bus.write_u16(IO_REG_START + 0x204, 3).unwrap();
+        assert_eq!(bus.transfer_cycles(0x0E00_0000, 1, false).unwrap(), 8);
+
+        // RegisterRamReset with the I/O flag restores the defaults.
+        bus.register_ram_reset(0x80);
+        assert_eq!(bus.transfer_cycles(ROM_START, 2, false).unwrap(), 4);
+        assert_eq!(bus.transfer_cycles(0x0E00_0000, 1, false).unwrap(), 4);
     }
 }

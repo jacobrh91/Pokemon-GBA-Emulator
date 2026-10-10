@@ -311,7 +311,7 @@ impl Cpu {
             );
         }
 
-        let instruction = match bus.read_u32(pc) {
+        let instruction = match bus.fetch_u32(pc) {
             Ok(instruction) => instruction,
             Err(_) => {
                 return self.take_exception(
@@ -376,7 +376,7 @@ impl Cpu {
                 &op,
                 bus,
                 pc,
-                fetch_sequential,
+                fetch_wait_cycles,
                 &self.registers,
                 self.cpsr & C_FLAG != 0,
             ) {
@@ -1256,18 +1256,16 @@ fn arm_wait_cycles(
     op: &ArmOp,
     bus: &MemoryBus,
     pc: u32,
-    fetch_sequential: bool,
+    fetch_wait_cycles: u32,
     registers: &[u32; 16],
     carry: bool,
 ) -> io::Result<u32> {
-    let wait_cycles = bus
-        .transfer_cycles(pc, 4, fetch_sequential)?
-        .saturating_sub(1);
-    let data_accesses: Vec<(u32, u8)> = match op {
+    let wait_cycles = fetch_wait_cycles;
+    let data_accesses = match op {
         ArmOp::Swap { byte, rn, .. } => {
             let address = registers[*rn as usize];
             let width = if *byte { 1 } else { 4 };
-            vec![(address, width), (address, width)]
+            DataAccesses::two((address, width), (address, width))
         }
         ArmOp::SingleDataTransfer {
             pre_index,
@@ -1302,7 +1300,7 @@ fn arm_wait_cycles(
                 base.wrapping_sub(displacement)
             };
             let address = if *pre_index { adjusted } else { base };
-            vec![(address, if *byte { 1 } else { 4 })]
+            DataAccesses::one(address, if *byte { 1 } else { 4 })
         }
         ArmOp::HalfwordTransfer {
             pre_index,
@@ -1327,7 +1325,7 @@ fn arm_wait_cycles(
             } else {
                 base.wrapping_sub(displacement)
             };
-            vec![(if *pre_index { adjusted } else { base }, 2)]
+            DataAccesses::one(if *pre_index { adjusted } else { base }, 2)
         }
         ArmOp::BlockTransfer {
             pre_index,
@@ -1358,11 +1356,9 @@ fn arm_wait_cycles(
                 (false, true) => base.wrapping_sub(span),
                 (false, false) => base.wrapping_sub(span).wrapping_add(4),
             };
-            (0..transfer_list.count_ones())
-                .map(|index| (start.wrapping_add(index * 4), 4))
-                .collect()
+            DataAccesses::words(start, transfer_list.count_ones())
         }
-        _ => Vec::new(),
+        _ => DataAccesses::none(),
     };
     add_data_wait_cycles(wait_cycles, bus, &data_accesses)
 }

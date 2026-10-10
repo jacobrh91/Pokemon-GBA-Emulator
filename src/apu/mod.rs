@@ -408,6 +408,11 @@ impl Apu {
         }
     }
 
+    /// Cycles until the next sample is mixed (always at least 1).
+    pub fn cycles_until_sample(&self) -> u32 {
+        SAMPLE_CYCLES - self.cycle_accumulator
+    }
+
     /// Advances time, mixing one stereo sample per [`SAMPLE_CYCLES`].
     pub fn advance(&mut self, cycles: u32, registers: &[u8]) {
         self.cycle_accumulator += cycles;

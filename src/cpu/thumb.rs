@@ -276,7 +276,7 @@ impl Cpu {
             );
         }
 
-        let opcode = match bus.read_u16(pc) {
+        let opcode = match bus.fetch_u16(pc) {
             Ok(opcode) => opcode,
             Err(_) => {
                 return self.take_exception(
@@ -294,131 +294,24 @@ impl Cpu {
             .transfer_cycles(pc, 2, fetch_sequential)?
             .saturating_sub(1);
         let op = thumb::decode(opcode);
-        let base_cycles: u32 = match &op {
-            ThumbOp::ShiftImmediate { .. }
-            | ThumbOp::MoveImmediate { .. }
-            | ThumbOp::CompareImmediate { .. }
-            | ThumbOp::AddImmediate { .. }
-            | ThumbOp::SubtractImmediate { .. } => 1,
-            ThumbOp::AddSubtract { .. } => 1,
-            ThumbOp::Alu {
-                opcode: 0xD, rd, ..
-            } => 1 + multiply_internal_cycles(self.registers[*rd as usize], true),
-            // Register-specified shifts take an extra internal cycle.
-            ThumbOp::Alu {
-                opcode: 0x2 | 0x3 | 0x4 | 0x7,
-                ..
-            } => 2,
-            ThumbOp::Alu { .. } => 1,
-            ThumbOp::HighRegister {
-                operation: 0 | 2,
-                rd: 15,
-                ..
-            }
-            | ThumbOp::BranchExchange { .. } => 3,
-            ThumbOp::HighRegister { .. } => 1,
-            ThumbOp::LoadPcRelative { .. } => 3,
-            ThumbOp::LoadStoreRegister { operation, .. } => {
-                if *operation <= 2 {
-                    2
-                } else {
-                    3
-                }
-            }
-            ThumbOp::LoadStoreImmediate { .. } => 2,
-            ThumbOp::LoadStoreHalfwordImmediate { load, .. }
-            | ThumbOp::SpRelativeLoadStore { load, .. } => {
-                if *load {
-                    3
-                } else {
-                    2
-                }
-            }
-            ThumbOp::LoadAddress { .. } | ThumbOp::AdjustSp { .. } => 1,
-            ThumbOp::PushPop {
-                pop,
-                register_list,
-                extra_register,
-            } => {
-                let count = register_list.count_ones() + u32::from(*extra_register);
-                // POP {PC} adds a pipeline refill (1S+1N) to the 1N+1I load.
-                count
-                    + match (*pop, *extra_register) {
-                        (true, true) => 3,
-                        (true, false) => 2,
-                        (false, _) => 1,
-                    }
-            }
-            ThumbOp::MultipleTransfer {
-                load,
-                register_list,
-                ..
-            } => register_list.count_ones().max(1) + 1 + u32::from(*load),
-            ThumbOp::BranchConditional { condition, .. } => {
-                if self.condition_passed(*condition) {
-                    3
-                } else {
-                    1
-                }
-            }
-            ThumbOp::SoftwareInterrupt { .. } => 3,
-            ThumbOp::LongBranchPrefix { .. } => 1,
-            ThumbOp::LongBranchSuffix { .. } => 3,
-            ThumbOp::BranchUnconditional { .. } => 3,
-            ThumbOp::Unknown(_) => {
-                return self.take_exception(
-                    MODE_UNDEFINED,
-                    VECTOR_UNDEFINED,
-                    pc.wrapping_add(2),
-                    self.cpsr,
-                    exception_entry_cycles(3, fetch_wait_cycles)?,
-                );
-            }
-        };
-        let wait_cycles = match thumb_wait_cycles(&op, bus, pc, fetch_sequential, &self.registers) {
-            Ok(cycles) => cycles,
-            Err(error) if is_memory_fault(&error) => {
-                return self.take_exception(
-                    MODE_ABORT,
-                    VECTOR_DATA_ABORT,
-                    pc.wrapping_add(8),
-                    self.cpsr,
-                    exception_entry_cycles(4, fetch_wait_cycles)?,
-                );
-            }
-            Err(error) => return Err(error),
-        };
-        let instruction_cycles = base_cycles
-            .checked_add(wait_cycles)
-            .ok_or_else(|| io::Error::other("instruction cycle count overflow"))?;
-        let total_cycles = self
-            .cycles
-            .checked_add(u64::from(instruction_cycles))
-            .ok_or_else(|| io::Error::other("CPU cycle counter overflow"))?;
+        if matches!(op, ThumbOp::Unknown(_)) {
+            return self.take_exception(
+                MODE_UNDEFINED,
+                VECTOR_UNDEFINED,
+                pc.wrapping_add(2),
+                self.cpsr,
+                exception_entry_cycles(3, fetch_wait_cycles)?,
+            );
+        }
+        // Base cycles and branch outcome are decided from the state before
+        // execution; data wait states accumulate while it runs.
+        let (base_cycles, branched) = self.thumb_timing(&op);
+        // Fail before executing, so a counter overflow has no side effects.
+        if self.cycles > u64::MAX - MAX_INSTRUCTION_CYCLES {
+            return Err(io::Error::other("CPU cycle counter overflow"));
+        }
+        self.data_wait = 0;
 
-        let branched = match &op {
-            ThumbOp::BranchUnconditional { .. }
-            | ThumbOp::BranchExchange { .. }
-            | ThumbOp::LongBranchSuffix { .. }
-            | ThumbOp::SoftwareInterrupt { .. }
-            | ThumbOp::HighRegister {
-                operation: 0 | 2,
-                rd: 15,
-                ..
-            }
-            | ThumbOp::PushPop {
-                pop: true,
-                extra_register: true,
-                ..
-            }
-            | ThumbOp::MultipleTransfer {
-                load: true,
-                register_list: 0,
-                ..
-            } => true,
-            ThumbOp::BranchConditional { condition, .. } => self.condition_passed(*condition),
-            _ => false,
-        };
         let instruction_status = self.cpsr;
         if let Err(error) = self.execute_thumb(op, pc, bus) {
             let (mode, vector, return_address, cycles) = if is_memory_fault(&error) {
@@ -443,10 +336,17 @@ impl Cpu {
             };
             return self.take_exception(mode, vector, return_address, instruction_status, cycles);
         }
+        let instruction_cycles = base_cycles
+            .checked_add(fetch_wait_cycles)
+            .and_then(|cycles| cycles.checked_add(self.data_wait))
+            .ok_or_else(|| io::Error::other("instruction cycle count overflow"))?;
+        self.cycles = self
+            .cycles
+            .checked_add(u64::from(instruction_cycles))
+            .ok_or_else(|| io::Error::other("CPU cycle counter overflow"))?;
         if !branched {
             self.registers[15] = pc.wrapping_add(2);
         }
-        self.cycles = total_cycles;
         self.sequential_fetch = if branched {
             None
         } else {
@@ -454,6 +354,92 @@ impl Cpu {
         };
 
         Ok(instruction_cycles)
+    }
+
+    /// `(base cycles, ends in a branch)` for `op`, from the pre-execution
+    /// state (ARM7TDMI datasheet "Instruction Cycle Times", zero wait states).
+    fn thumb_timing(&self, op: &ThumbOp) -> (u32, bool) {
+        match op {
+            ThumbOp::ShiftImmediate { .. }
+            | ThumbOp::MoveImmediate { .. }
+            | ThumbOp::CompareImmediate { .. }
+            | ThumbOp::AddImmediate { .. }
+            | ThumbOp::SubtractImmediate { .. }
+            | ThumbOp::AddSubtract { .. }
+            | ThumbOp::LoadAddress { .. }
+            | ThumbOp::AdjustSp { .. }
+            | ThumbOp::LongBranchPrefix { .. } => (1, false),
+            ThumbOp::Alu {
+                opcode: 0xD, rd, ..
+            } => (
+                1 + multiply_internal_cycles(self.registers[*rd as usize], true),
+                false,
+            ),
+            // Register-specified shifts take an extra internal cycle.
+            ThumbOp::Alu {
+                opcode: 0x2 | 0x3 | 0x4 | 0x7,
+                ..
+            } => (2, false),
+            ThumbOp::Alu { .. } => (1, false),
+            ThumbOp::HighRegister {
+                operation: 0 | 2,
+                rd: 15,
+                ..
+            }
+            | ThumbOp::BranchExchange { .. }
+            | ThumbOp::SoftwareInterrupt { .. }
+            | ThumbOp::LongBranchSuffix { .. }
+            | ThumbOp::BranchUnconditional { .. } => (3, true),
+            ThumbOp::HighRegister { .. } => (1, false),
+            ThumbOp::LoadPcRelative { .. } => (3, false),
+            ThumbOp::LoadStoreRegister { operation, .. } => {
+                (if *operation <= 2 { 2 } else { 3 }, false)
+            }
+            // Loads are 1S+1N+1I, stores 2N.
+            ThumbOp::LoadStoreImmediate { load, .. }
+            | ThumbOp::LoadStoreHalfwordImmediate { load, .. }
+            | ThumbOp::SpRelativeLoadStore { load, .. } => (if *load { 3 } else { 2 }, false),
+            ThumbOp::PushPop {
+                pop,
+                register_list,
+                extra_register,
+            } => {
+                let count = register_list.count_ones() + u32::from(*extra_register);
+                // POP {PC} adds a pipeline refill (1S+1N) to the 1N+1I load.
+                match (*pop, *extra_register) {
+                    (true, true) => (count + 3, true),
+                    (true, false) => (count + 2, false),
+                    (false, _) => (count + 1, false),
+                }
+            }
+            ThumbOp::MultipleTransfer {
+                load,
+                register_list,
+                ..
+            } => (
+                register_list.count_ones().max(1) + 1 + u32::from(*load),
+                *load && *register_list == 0,
+            ),
+            ThumbOp::BranchConditional { condition, .. } => {
+                if self.condition_passed(*condition) {
+                    (3, true)
+                } else {
+                    (1, false)
+                }
+            }
+            ThumbOp::Unknown(_) => (1, false),
+        }
+    }
+
+    /// Records the wait states of one data access (cycles beyond the single
+    /// cycle already counted in the instruction's base cycles).
+    #[inline]
+    fn charge_data_access(&mut self, bus: &MemoryBus, address: u32, width: u8, sequential: bool) {
+        let cycles = bus
+            .transfer_cycles(address, width, sequential)
+            .unwrap_or(1)
+            .saturating_sub(1);
+        self.data_wait += cycles;
     }
 
     fn execute_thumb_arithmetic(&mut self, rd: u8, lhs: u32, rhs: u32, subtract: bool) {
@@ -621,6 +607,7 @@ impl Cpu {
             ThumbOp::LoadPcRelative { rd, offset } => {
                 let address =
                     (instruction_pc.wrapping_add(4) & !3).wrapping_add(u32::from(offset) * 4);
+                self.charge_data_access(bus, address, 4, false);
                 self.registers[rd as usize] = bus.read_u32(address)?;
             }
             ThumbOp::LoadStoreRegister {
@@ -630,6 +617,12 @@ impl Cpu {
                 ro,
             } => {
                 let address = self.registers[rb as usize].wrapping_add(self.registers[ro as usize]);
+                let width = match operation {
+                    0 | 4 => 4,
+                    1 | 5 | 7 => 2,
+                    _ => 1,
+                };
+                self.charge_data_access(bus, address, width, false);
                 match operation {
                     0 => bus.write_u32(address & !3, self.registers[rd as usize])?,
                     1 => bus.write_u16(address & !1, self.registers[rd as usize] as u16)?,
@@ -719,6 +712,7 @@ impl Cpu {
                     u32::from(offset) * 4
                 };
                 let address = base.wrapping_add(displacement);
+                self.charge_data_access(bus, address, if byte { 1 } else { 4 }, false);
                 if load {
                     let value = if byte {
                         u32::from(bus.read_u8(address)?)
@@ -739,6 +733,7 @@ impl Cpu {
                 offset,
             } => {
                 let address = self.registers[rb as usize].wrapping_add(u32::from(offset) * 2);
+                self.charge_data_access(bus, address, 2, false);
                 if load {
                     self.registers[rd as usize] = load_halfword(bus, address)?;
                 } else {
@@ -747,6 +742,7 @@ impl Cpu {
             }
             ThumbOp::SpRelativeLoadStore { load, rd, offset } => {
                 let address = self.registers[13].wrapping_add(u32::from(offset) * 4);
+                self.charge_data_access(bus, address, 4, false);
                 if load {
                     self.registers[rd as usize] =
                         bus.read_u32(address & !3)?.rotate_right((address & 3) * 8);
@@ -777,13 +773,17 @@ impl Cpu {
             } => {
                 if pop {
                     let mut address = self.registers[13];
+                    let mut first = true;
                     for register in 0..8 {
                         if register_list & (1 << register) != 0 {
+                            self.charge_data_access(bus, address, 4, !first);
+                            first = false;
                             self.registers[register] = bus.read_u32(address & !3)?;
                             address = address.wrapping_add(4);
                         }
                     }
                     if extra_register {
+                        self.charge_data_access(bus, address, 4, !first);
                         let value = bus.read_u32(address & !3)?;
                         if pop {
                             self.registers[15] = value & !1;
@@ -798,13 +798,17 @@ impl Cpu {
                     let count = register_list.count_ones() + u32::from(extra_register);
                     let start = self.registers[13].wrapping_sub(count * 4);
                     let mut address = start;
+                    let mut first = true;
                     for register in 0..8 {
                         if register_list & (1 << register) != 0 {
+                            self.charge_data_access(bus, address, 4, !first);
+                            first = false;
                             bus.write_u32(address, self.registers[register])?;
                             address = address.wrapping_add(4);
                         }
                     }
                     if extra_register {
+                        self.charge_data_access(bus, address, 4, !first);
                         bus.write_u32(address, self.registers[14])?;
                     }
                     self.registers[13] = start;
@@ -817,6 +821,7 @@ impl Cpu {
             } => {
                 let base = self.registers[rb as usize];
                 if register_list == 0 {
+                    self.charge_data_access(bus, base, 4, false);
                     // Empty list transfers PC alone and moves the base by 0x40.
                     if load {
                         self.registers[15] = bus.read_u32(base & !3)? & !1;
@@ -829,10 +834,13 @@ impl Cpu {
                 let final_base = base.wrapping_add(register_list.count_ones() * 4);
                 let first_register = register_list.trailing_zeros() as usize;
                 let mut address = base;
+                let mut first = true;
                 for register in 0..8 {
                     if register_list & (1 << register) == 0 {
                         continue;
                     }
+                    self.charge_data_access(bus, address, 4, !first);
+                    first = false;
                     if load {
                         self.registers[register] = bus.read_u32(address & !3)?;
                     } else {
@@ -876,72 +884,6 @@ impl Cpu {
         }
         Ok(())
     }
-}
-
-fn thumb_wait_cycles(
-    op: &ThumbOp,
-    bus: &MemoryBus,
-    pc: u32,
-    fetch_sequential: bool,
-    registers: &[u32; 16],
-) -> io::Result<u32> {
-    let mut wait_cycles = bus
-        .transfer_cycles(pc, 2, fetch_sequential)?
-        .saturating_sub(1);
-    let data_accesses: Vec<(u32, u8)> = match op {
-        ThumbOp::LoadStoreRegister {
-            operation, rb, ro, ..
-        } => {
-            let address = registers[*rb as usize].wrapping_add(registers[*ro as usize]);
-            let width = match operation {
-                0 | 4 => 4,
-                1 | 5 | 7 => 2,
-                2 | 3 | 6 => 1,
-                _ => unreachable!(),
-            };
-            vec![(address, width)]
-        }
-        ThumbOp::LoadPcRelative { offset, .. } => vec![(
-            (pc.wrapping_add(4) & !3).wrapping_add(u32::from(*offset) * 4),
-            4,
-        )],
-        ThumbOp::LoadStoreImmediate {
-            byte, rb, offset, ..
-        } => vec![(
-            registers[*rb as usize].wrapping_add(u32::from(*offset) * if *byte { 1 } else { 4 }),
-            if *byte { 1 } else { 4 },
-        )],
-        ThumbOp::LoadStoreHalfwordImmediate { rb, offset, .. } => vec![(
-            registers[*rb as usize].wrapping_add(u32::from(*offset) * 2),
-            2,
-        )],
-        ThumbOp::SpRelativeLoadStore { offset, .. } => {
-            vec![(registers[13].wrapping_add(u32::from(*offset) * 4), 4)]
-        }
-        ThumbOp::PushPop {
-            pop,
-            extra_register,
-            register_list,
-        } => {
-            let count = register_list.count_ones() + u32::from(*extra_register);
-            let start = if *pop {
-                registers[13]
-            } else {
-                registers[13].wrapping_sub(count * 4)
-            };
-            (0..count)
-                .map(|index| (start.wrapping_add(index * 4), 4))
-                .collect()
-        }
-        ThumbOp::MultipleTransfer {
-            rb, register_list, ..
-        } => (0..register_list.count_ones().max(1))
-            .map(|index| (registers[*rb as usize].wrapping_add(index * 4), 4))
-            .collect(),
-        _ => Vec::<(u32, u8)>::new(),
-    };
-    wait_cycles = add_data_wait_cycles(wait_cycles, bus, &data_accesses)?;
-    Ok(wait_cycles)
 }
 
 #[cfg(test)]
