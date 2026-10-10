@@ -1,15 +1,17 @@
 use crate::cpu::Cpu;
 use crate::mmu::MemoryBus;
-use crate::ppu::Ppu;
+use crate::ppu::{Ppu, SCREEN_HEIGHT};
 use std::io;
 
-const MODE_SUPERVISOR: u32 = 0x13;
 const THUMB_STATE: u32 = 1 << 5;
+/// Granularity at which a halted CPU lets the rest of the system advance.
+const HALT_STEP_CYCLES: u32 = 32;
 
 pub struct Emulator {
     cpu: Cpu,
     memory: MemoryBus,
     ppu: Ppu,
+    frame_ready: bool,
 }
 
 impl Emulator {
@@ -23,6 +25,7 @@ impl Emulator {
             cpu: Cpu::default(),
             memory: MemoryBus::new(rom_path)?,
             ppu: Ppu::default(),
+            frame_ready: false,
         })
     }
 
@@ -35,52 +38,58 @@ impl Emulator {
     }
 
     pub fn step(&mut self) -> io::Result<u32> {
-        if self.cpu.mode() == MODE_SUPERVISOR && self.cpu.registers[15] == 0x08 {
-            let saved_status = self.cpu.saved_status()?;
-            let return_address = self.cpu.registers[14];
-            let service = if saved_status & THUMB_STATE != 0 {
-                let address = return_address.checked_sub(2).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "invalid Thumb SWI return address",
-                    )
-                })?;
-                let opcode = self.memory.read_u16(address)?;
-                if opcode & 0xFF00 != 0xDF00 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "SVC vector return address does not point after a Thumb SWI",
-                    ));
-                }
-                opcode as u8
-            } else {
-                let address = return_address.checked_sub(4).ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid ARM SWI return address")
-                })?;
-                let opcode = self.memory.read_u32(address)?;
-                if opcode & 0x0F00_0000 != 0x0F00_0000 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "SVC vector return address does not point after an ARM SWI",
-                    ));
-                }
-                opcode as u8
-            };
-            self.cpu.handle_bios_swi(service, &mut self.memory)?;
-            return Ok(0);
+        if self.cpu.halted {
+            if !self.cpu.should_wake(&self.memory) {
+                self.cpu.cycles += u64::from(HALT_STEP_CYCLES);
+                self.advance_bus(HALT_STEP_CYCLES);
+                return Ok(HALT_STEP_CYCLES);
+            }
+            self.cpu.halted = false;
+            if self.memory.irq_pending() && self.cpu.request_irq(&mut self.memory)? {
+                self.advance_bus(3);
+                return Ok(3);
+            }
         }
 
-        let mut cycles = if self.cpu.cpsr & (1 << 5) != 0 {
+        if let Some(cycles) = self.cpu.step_bios_hle(&mut self.memory)? {
+            return Ok(cycles);
+        }
+
+        let mut cycles = if self.cpu.cpsr & THUMB_STATE != 0 {
             self.step_thumb()
         } else {
             self.cpu.step_arm(&mut self.memory)
         }?;
-        self.memory.advance(cycles);
-        if self.memory.irq_pending() && self.cpu.request_irq(&self.memory)? {
-            self.memory.advance(3);
+        self.advance_bus(cycles);
+        // DMA stalls the CPU for as long as it owns the bus.
+        let dma_cycles = self.memory.take_dma_cycles();
+        if dma_cycles > 0 {
+            self.cpu.cycles += u64::from(dma_cycles);
+            self.advance_bus(dma_cycles);
+            cycles += dma_cycles;
+        }
+        if self.memory.irq_pending() && self.cpu.request_irq(&mut self.memory)? {
+            self.advance_bus(3);
             cycles += 3;
         }
         Ok(cycles)
+    }
+
+    /// Advances the bus and draws every scanline that finished meanwhile.
+    fn advance_bus(&mut self, cycles: u32) {
+        self.memory.advance(cycles);
+        for snapshot in self.memory.take_scanlines() {
+            self.ppu
+                .render_scanline(snapshot.line, &snapshot.registers, &self.memory);
+            if snapshot.line == SCREEN_HEIGHT - 1 {
+                self.frame_ready = true;
+            }
+        }
+    }
+
+    /// True once per frame, after the last visible scanline was drawn.
+    pub fn take_frame_ready(&mut self) -> bool {
+        std::mem::take(&mut self.frame_ready)
     }
 
     pub fn cpu(&self) -> &Cpu {
@@ -112,6 +121,7 @@ impl Emulator {
 mod tests {
     use super::*;
     use crate::mmu::IO_REG_START;
+    const MODE_SUPERVISOR: u32 = 0x13;
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -240,19 +250,89 @@ mod tests {
     }
 
     #[test]
-    fn system_handles_thumb_vblank_wait_without_a_ppu_clock() {
+    fn vblank_intr_wait_halts_until_the_irq_handler_flags_vblank() {
         let path = rom_file(0xDF05);
         let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
         fs::remove_file(path).unwrap();
         emulator.cpu_mut().registers[15] = ROM_START;
-        emulator.cpu_mut().set_cpsr(0x1F | THUMB_STATE).unwrap();
+        emulator
+            .cpu_mut()
+            .set_cpsr(0x1F | THUMB_STATE | (1 << 7))
+            .unwrap();
 
         emulator.step().unwrap();
         assert_eq!(emulator.cpu().registers[15], 0x08);
+
+        // HLE rewinds to the SWI and halts while no flag has been raised.
         assert_eq!(emulator.step().unwrap(), 0);
+        assert!(emulator.cpu().halted);
+        assert_eq!(emulator.cpu().registers[15], ROM_START);
         assert_eq!(emulator.cpu().mode(), 0x1F);
-        assert_eq!(emulator.cpu().cpsr & THUMB_STATE, THUMB_STATE);
+        let idle = emulator.step().unwrap();
+        assert!(idle > 0 && emulator.cpu().halted);
+
+        // A VBlank interrupt wakes the CPU; the game handler would set BIOS_IF.
+        emulator
+            .memory_mut()
+            .write_u16(IO_REG_START + 0x200, 1)
+            .unwrap();
+        emulator.memory_mut().io_regs[0x202] = 1;
+        emulator.memory_mut().write_u16(0x0300_7FF8, 1).unwrap();
+        emulator.step().unwrap(); // wakes and re-executes the SWI
+        assert!(!emulator.cpu().halted);
+        assert_eq!(emulator.cpu().registers[15], 0x08);
+        assert_eq!(emulator.step().unwrap(), 0);
         assert_eq!(emulator.cpu().registers[15], ROM_START + 2);
+        assert_eq!(emulator.memory().read_u16(0x0300_7FF8).unwrap(), 0);
+    }
+
+    #[test]
+    fn bios_irq_stub_saves_registers_and_returns_to_the_interrupted_code() {
+        let path = arm_rom_file(0xE1A0_0000);
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        fs::remove_file(path).unwrap();
+        emulator.initialize_gba_startup(ROM_START).unwrap();
+        let handler = 0x0300_3580;
+        emulator
+            .memory_mut()
+            .write_u32(0x0300_7FFC, handler)
+            .unwrap();
+        // Handler is a single `bx lr`.
+        emulator
+            .memory_mut()
+            .write_u32(handler, 0xE12F_FF1E)
+            .unwrap();
+        emulator
+            .memory_mut()
+            .write_u16(IO_REG_START + 0x200, 1)
+            .unwrap();
+        emulator
+            .memory_mut()
+            .write_u16(IO_REG_START + 0x208, 1)
+            .unwrap();
+        emulator.memory_mut().io_regs[0x202] = 1;
+        let cpsr = emulator.cpu().cpsr & !(1 << 7);
+        emulator.cpu_mut().set_cpsr(cpsr).unwrap();
+        emulator.cpu_mut().registers[0] = 0xAAAA;
+        emulator.cpu_mut().registers[12] = 0xBBBB;
+
+        emulator.step().unwrap(); // nop at ROM_START, then IRQ entry
+        assert_eq!(emulator.cpu().mode(), 0x12);
+        assert_eq!(emulator.cpu().registers[15], handler);
+        assert_eq!(emulator.cpu().registers[14], crate::cpu::BIOS_IRQ_RETURN);
+        // Handler acknowledges the interrupt, clobbers registers, returns.
+        emulator.memory_mut().io_regs[0x202] = 0;
+        emulator.cpu_mut().registers[0] = 0;
+        emulator.cpu_mut().registers[12] = 0;
+        emulator.step().unwrap(); // bx lr
+        assert_eq!(emulator.cpu().registers[15], crate::cpu::BIOS_IRQ_RETURN);
+        emulator.step().unwrap(); // HLE ldmfd + subs pc, lr, #4
+
+        assert_eq!(emulator.cpu().mode(), 0x1F);
+        assert_eq!(emulator.cpu().registers[15], ROM_START + 4);
+        assert_eq!(emulator.cpu().registers[0], 0xAAAA);
+        assert_eq!(emulator.cpu().registers[12], 0xBBBB);
+        assert_eq!(emulator.cpu().registers[13], 0x0300_7F00);
     }
 
     #[test]
@@ -393,5 +473,33 @@ mod tests {
             emulator.memory().read_u16(IO_REG_START + 0x202).unwrap() & 1,
             1
         );
+    }
+
+    #[test]
+    fn obj_affine_set_writes_rotation_matrix_with_output_stride() {
+        let path = rom_file(0xDF0F);
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        fs::remove_file(path).unwrap();
+        emulator.cpu_mut().registers[15] = ROM_START;
+        emulator.cpu_mut().set_cpsr(0x1F | THUMB_STATE).unwrap();
+        let source = crate::mmu::EWRAM_START;
+        let dest = crate::mmu::IWRAM_START;
+        let bus = emulator.memory_mut();
+        bus.write_u16(source, 0x0200).unwrap(); // sx = 2.0
+        bus.write_u16(source + 2, 0x0100).unwrap(); // sy = 1.0
+        bus.write_u16(source + 4, 0x4000).unwrap(); // 90 degrees
+        emulator.cpu_mut().registers[0] = source;
+        emulator.cpu_mut().registers[1] = dest;
+        emulator.cpu_mut().registers[2] = 1;
+        emulator.cpu_mut().registers[3] = 8;
+
+        emulator.step().unwrap();
+        emulator.step().unwrap();
+
+        let read = |offset: u32| emulator.memory().read_u16(dest + offset).unwrap() as i16;
+        assert_eq!(read(0), 0); // pa = sx*cos
+        assert_eq!(read(8), -0x200); // pb = -sx*sin
+        assert_eq!(read(16), 0x100); // pc = sy*sin
+        assert_eq!(read(24), 0); // pd = sy*cos
     }
 }

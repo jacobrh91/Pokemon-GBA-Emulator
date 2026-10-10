@@ -2,6 +2,9 @@ use memmap2::Mmap;
 use std::fs::File;
 use std::io;
 
+mod dma;
+use dma::{DmaChannel, DmaTiming};
+
 pub const ROM_START: u32 = 0x0800_0000;
 pub const ROM_END: u32 = 0x0DFF_FFFF;
 pub const EWRAM_START: u32 = 0x0200_0000;
@@ -17,13 +20,37 @@ const TIMER_BASE: usize = 0x100;
 const INTERRUPT_ENABLE: usize = 0x200;
 const INTERRUPT_REQUEST: usize = 0x202;
 const INTERRUPT_MASTER_ENABLE: usize = 0x208;
+/// `msr cpsr_fc, r0`: the last opcode the BIOS fetches while booting.
+pub const BIOS_OPEN_BUS_RESET: u32 = 0xE129_F000;
+/// Last opcode fetched after a BIOS software interrupt returns.
+pub const BIOS_OPEN_BUS_AFTER_SWI: u32 = 0xE3A0_2004;
+/// Last opcode fetched after the BIOS IRQ handler returns.
+pub const BIOS_OPEN_BUS_AFTER_IRQ: u32 = 0xE25E_F004;
+const DISPCNT: usize = 0x000;
+const DISPCNT_FORCED_BLANK: u8 = 0x80;
 const DISPSTAT: usize = 0x004;
 const VCOUNT: usize = 0x006;
 const KEYINPUT: usize = 0x130;
 const CYCLES_PER_SCANLINE: u32 = 1232;
 const VBLANK_START_SCANLINE: u32 = 160;
-const CYCLES_PER_FRAME: u32 = CYCLES_PER_SCANLINE * 228;
+const TOTAL_SCANLINES: u32 = 228;
+const HBLANK_START_CYCLES: u32 = 240 * 4;
+#[cfg(test)]
 const VBLANK_START_CYCLES: u32 = CYCLES_PER_SCANLINE * VBLANK_START_SCANLINE;
+const CYCLES_PER_FRAME: u32 = CYCLES_PER_SCANLINE * TOTAL_SCANLINES;
+
+/// Display registers (DISPCNT..BLDY) as they were when a visible scanline
+/// finished drawing. HBlank DMA runs after the snapshot, so per-line scroll
+/// and window effects land on the following line, as on hardware.
+#[derive(Clone)]
+pub struct ScanlineSnapshot {
+    pub line: usize,
+    pub registers: [u8; DISPLAY_REGISTER_BYTES],
+}
+
+pub const DISPLAY_REGISTER_BYTES: usize = 0x60;
+/// Snapshots queued without a consumer are dropped past this many.
+const MAX_QUEUED_SCANLINES: usize = 512;
 
 #[derive(Default)]
 struct Timer {
@@ -43,6 +70,10 @@ enum Region {
     Vram(usize),
     Oam(usize),
     SaveRam(usize),
+    /// BIOS ROM window; not readable by the cartridge code.
+    Bios,
+    /// No device drives the bus here.
+    OpenBus,
 }
 
 pub struct MemoryBus {
@@ -57,6 +88,13 @@ pub struct MemoryBus {
     key_input: u16,
     display_cycles: u32,
     timers: [Timer; 4],
+    dma: [DmaChannel; 4],
+    dma_cycles: u32,
+    /// Last value the CPU fetched; unmapped reads return it.
+    open_bus: u32,
+    scanlines: Vec<ScanlineSnapshot>,
+    /// Last BIOS opcode fetched, returned for BIOS reads from outside it.
+    bios_open_bus: u32,
 }
 
 impl MemoryBus {
@@ -65,11 +103,15 @@ impl MemoryBus {
         // Safety: The ROM mapping is read-only and assumes the file is not modified during use.
         let rom = unsafe { Mmap::map(&file)? };
 
+        let mut io_regs = Box::new([0; 1024]);
+        // The BIOS hands over with the display in forced blank.
+        io_regs[DISPCNT] = DISPCNT_FORCED_BLANK;
+
         Ok(Self {
             rom,
             ewram: Box::new([0; 256 * 1024]),
             iwram: Box::new([0; 32 * 1024]),
-            io_regs: Box::new([0; 1024]),
+            io_regs,
             palette_ram: Box::new([0; 1024]),
             vram: Box::new([0; 96 * 1024]),
             oam: Box::new([0; 1024]),
@@ -77,17 +119,23 @@ impl MemoryBus {
             key_input: 0x03FF,
             display_cycles: 0,
             timers: std::array::from_fn(|_| Timer::default()),
+            dma: [DmaChannel::default(); 4],
+            dma_cycles: 0,
+            open_bus: 0,
+            scanlines: Vec::new(),
+            bios_open_bus: BIOS_OPEN_BUS_RESET,
         })
     }
 
     pub fn read_u8(&self, address: u32) -> io::Result<u8> {
         match self.resolve(address)? {
-            Region::Rom(offset) => self.rom.get(offset).copied().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "read address is beyond the mapped ROM",
-                )
-            }),
+            // Past the end of the cartridge the address bus echoes itself.
+            Region::Rom(offset) => Ok(self.rom.get(offset).copied().unwrap_or_else(|| {
+                let halfword = (address >> 1) as u16;
+                halfword.to_le_bytes()[(address & 1) as usize]
+            })),
+            Region::Bios => Ok(self.bios_open_bus.to_le_bytes()[(address & 3) as usize]),
+            Region::OpenBus => Ok(self.open_bus.to_le_bytes()[(address & 3) as usize]),
             Region::Ewram(offset) => Ok(self.ewram[offset]),
             Region::Iwram(offset) => Ok(self.iwram[offset]),
             Region::Io(offset) => Ok(self.read_io_byte(offset)),
@@ -159,7 +207,9 @@ impl MemoryBus {
     pub fn transfer_cycles(&self, address: u32, width: u8, sequential: bool) -> io::Result<u32> {
         let region = self.resolve(address)?;
         let halfword_cycles = match region {
-            Region::Iwram(_)
+            Region::Bios
+            | Region::OpenBus
+            | Region::Iwram(_)
             | Region::Io(_)
             | Region::PaletteRam(_)
             | Region::Vram(_)
@@ -212,7 +262,9 @@ impl MemoryBus {
         })
     }
 
-    pub fn irq_pending(&self) -> bool {
+    /// True when any enabled interrupt source is requested (`IE & IF`),
+    /// regardless of IME. This is the condition that wakes a halted CPU.
+    pub fn interrupt_requested(&self) -> bool {
         let ie = u16::from_le_bytes([
             self.io_regs[INTERRUPT_ENABLE],
             self.io_regs[INTERRUPT_ENABLE + 1],
@@ -221,21 +273,15 @@ impl MemoryBus {
             self.io_regs[INTERRUPT_REQUEST],
             self.io_regs[INTERRUPT_REQUEST + 1],
         ]);
-        self.io_regs[INTERRUPT_MASTER_ENABLE] & 1 != 0 && ie & requested != 0
+        ie & requested != 0
+    }
+
+    pub fn irq_pending(&self) -> bool {
+        self.io_regs[INTERRUPT_MASTER_ENABLE] & 1 != 0 && self.interrupt_requested()
     }
 
     pub fn advance(&mut self, cycles: u32) {
-        let old_display_cycles = self.display_cycles;
-        let distance_to_vblank = if old_display_cycles < VBLANK_START_CYCLES {
-            VBLANK_START_CYCLES - old_display_cycles
-        } else {
-            CYCLES_PER_FRAME - old_display_cycles + VBLANK_START_CYCLES
-        };
-        if u64::from(cycles) >= u64::from(distance_to_vblank)
-            && self.io_regs[DISPSTAT] & (1 << 3) != 0
-        {
-            self.io_regs[INTERRUPT_REQUEST] |= 1;
-        }
+        self.display_events(cycles);
         self.display_cycles = ((u64::from(self.display_cycles) + u64::from(cycles))
             % u64::from(CYCLES_PER_FRAME)) as u32;
 
@@ -259,6 +305,64 @@ impl MemoryBus {
         }
     }
 
+    /// Raises display interrupts and starts VBlank/HBlank DMA for every
+    /// scanline boundary crossed while `cycles` elapse.
+    fn display_events(&mut self, cycles: u32) {
+        let start = u64::from(self.display_cycles);
+        let end = start + u64::from(cycles);
+        let dispstat = u16::from_le_bytes([self.io_regs[DISPSTAT], self.io_regs[DISPSTAT + 1]]);
+        let line_cycles = u64::from(CYCLES_PER_SCANLINE);
+        let hblank_offset = u64::from(HBLANK_START_CYCLES);
+
+        for scanline in start / line_cycles..=end / line_cycles {
+            let line = (scanline % u64::from(TOTAL_SCANLINES)) as u32;
+            let line_start = scanline * line_cycles;
+            if line_start > start && line_start <= end {
+                if line == VBLANK_START_SCANLINE {
+                    if dispstat & (1 << 3) != 0 {
+                        self.io_regs[INTERRUPT_REQUEST] |= 1;
+                    }
+                    self.trigger_dma(DmaTiming::VBlank);
+                }
+                if dispstat & (1 << 5) != 0 && line == u32::from(dispstat >> 8) {
+                    self.io_regs[INTERRUPT_REQUEST] |= 1 << 2;
+                }
+            }
+            let hblank = line_start + hblank_offset;
+            if hblank > start && hblank <= end {
+                if dispstat & (1 << 4) != 0 {
+                    self.io_regs[INTERRUPT_REQUEST] |= 1 << 1;
+                }
+                if line < VBLANK_START_SCANLINE {
+                    if self.scanlines.len() < MAX_QUEUED_SCANLINES {
+                        let mut registers = [0; DISPLAY_REGISTER_BYTES];
+                        registers.copy_from_slice(&self.io_regs[..DISPLAY_REGISTER_BYTES]);
+                        self.scanlines.push(ScanlineSnapshot {
+                            line: line as usize,
+                            registers,
+                        });
+                    }
+                    self.trigger_dma(DmaTiming::HBlank);
+                }
+            }
+        }
+    }
+
+    /// Records the value on the data bus after a CPU opcode fetch.
+    pub fn set_open_bus(&mut self, value: u32) {
+        self.open_bus = value;
+    }
+
+    /// Records the last opcode the (emulated) BIOS fetched.
+    pub fn set_bios_open_bus(&mut self, value: u32) {
+        self.bios_open_bus = value;
+    }
+
+    /// Scanlines that finished drawing since the last call, oldest first.
+    pub fn take_scanlines(&mut self) -> Vec<ScanlineSnapshot> {
+        std::mem::take(&mut self.scanlines)
+    }
+
     pub fn set_key_input(&mut self, pressed_keys: u16) {
         self.key_input = pressed_keys & 0x03FF;
     }
@@ -268,7 +372,8 @@ impl MemoryBus {
             self.ewram.fill(0);
         }
         if flags & 2 != 0 {
-            self.iwram.fill(0);
+            // The BIOS keeps the last 0x200 bytes (stacks, IRQ vector, flags).
+            self.iwram[..0x7E00].fill(0);
         }
         if flags & 4 != 0 {
             self.palette_ram.fill(0);
@@ -281,7 +386,9 @@ impl MemoryBus {
         }
         if flags & 0x80 != 0 {
             self.io_regs.fill(0);
+            self.io_regs[DISPCNT] = DISPCNT_FORCED_BLANK;
             self.timers = std::array::from_fn(|_| Timer::default());
+            self.dma = [DmaChannel::default(); 4];
         }
     }
 
@@ -337,10 +444,8 @@ impl MemoryBus {
                 }
                 Ok(Region::Rom(offset))
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                format!("unmapped memory address: {address:#010X}"),
-            )),
+            0x0000_0000..=0x0000_3FFF => Ok(Region::Bios),
+            _ => Ok(Region::OpenBus),
         }
     }
 
@@ -364,8 +469,9 @@ impl MemoryBus {
                     self.io_regs[offset] = value;
                 }
                 self.update_timer_register(offset);
+                self.dma_register_written(offset);
             }
-            Region::Rom(_) => {}
+            Region::Rom(_) | Region::Bios | Region::OpenBus => {}
         }
         Ok(())
     }
@@ -373,7 +479,16 @@ impl MemoryBus {
     fn read_io_byte(&self, offset: usize) -> u8 {
         if offset == DISPSTAT {
             let scanline = self.display_cycles / CYCLES_PER_SCANLINE;
-            return (self.io_regs[offset] & !1) | u8::from(scanline >= VBLANK_START_SCANLINE);
+            let in_hblank = self.display_cycles % CYCLES_PER_SCANLINE >= HBLANK_START_CYCLES;
+            let in_vblank = (VBLANK_START_SCANLINE..TOTAL_SCANLINES - 1).contains(&scanline);
+            let lyc = u32::from(self.io_regs[DISPSTAT + 1]);
+            return (self.io_regs[offset] & !7)
+                | u8::from(in_vblank)
+                | u8::from(in_hblank) << 1
+                | u8::from(scanline == lyc) << 2;
+        }
+        if dma::dma_register_is_write_only(offset) {
+            return 0;
         }
         if offset == VCOUNT {
             return (self.display_cycles / CYCLES_PER_SCANLINE) as u8;
@@ -555,14 +670,14 @@ mod tests {
         );
         assert_eq!(bus.read_u32(ROM_START).unwrap(), 0x7856_3412);
         assert_eq!(bus.read_u8(ROM_START + 4).unwrap(), 0x12);
-        assert_eq!(
-            bus.read_u8(0).unwrap_err().kind(),
-            io::ErrorKind::AddrNotAvailable
-        );
-        assert_eq!(
-            bus.read_u8(IO_REG_END + 1).unwrap_err().kind(),
-            io::ErrorKind::AddrNotAvailable
-        );
+        // Past the cartridge the bus echoes the halfword address.
+        let odd_sized = bus_with_rom(&[0; 6]);
+        assert_eq!(odd_sized.read_u16(ROM_START + 0x100).unwrap(), 0x0080);
+        // BIOS and unmapped regions return open bus rather than faulting.
+        assert_eq!(bus.read_u32(0).unwrap(), BIOS_OPEN_BUS_RESET);
+        bus.set_open_bus(0xCAFE_F00D);
+        assert_eq!(bus.read_u32(IO_REG_END + 1).unwrap(), 0xCAFE_F00D);
+        bus.write_u32(IO_REG_END + 1, 0).unwrap();
         assert_eq!(bus.read_u8(ROM_END).unwrap(), 0x78);
     }
 
@@ -629,16 +744,6 @@ mod tests {
             bus.read_u16(IO_REG_START + KEYINPUT as u32).unwrap(),
             0x03FE
         );
-    }
-
-    #[test]
-    fn failed_word_write_does_not_partially_modify_io_registers() {
-        let mut bus = bus_with_rom(&[0; 4]);
-        let result = bus.write_u32(IO_REG_END - 1, 0x1234_5678);
-
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AddrNotAvailable);
-        assert_eq!(bus.io_regs[(IO_REG_END - IO_REG_START - 1) as usize], 0);
-        assert_eq!(bus.io_regs[(IO_REG_END - IO_REG_START) as usize], 0);
     }
 
     #[test]
@@ -729,5 +834,138 @@ mod tests {
         for base in [0x0800_0000, 0x0A00_0000, 0x0C00_0000] {
             assert_eq!(bus.read_u32(base).unwrap(), 0x7856_3412);
         }
+    }
+
+    fn program_dma(
+        bus: &mut MemoryBus,
+        channel: u32,
+        source: u32,
+        dest: u32,
+        count: u16,
+        control: u16,
+    ) {
+        let base = IO_REG_START + 0xB0 + channel * 12;
+        bus.write_u32(base, source).unwrap();
+        bus.write_u32(base + 4, dest).unwrap();
+        bus.write_u16(base + 8, count).unwrap();
+        bus.write_u16(base + 10, control).unwrap();
+    }
+
+    #[test]
+    fn immediate_dma_copies_words_and_clears_enable() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        for index in 0..4 {
+            bus.write_u32(EWRAM_START + index * 4, 0x1111_0000 + index)
+                .unwrap();
+        }
+        program_dma(&mut bus, 3, EWRAM_START, IWRAM_START, 4, 0x8000 | (1 << 10));
+
+        for index in 0..4 {
+            assert_eq!(
+                bus.read_u32(IWRAM_START + index * 4).unwrap(),
+                0x1111_0000 + index
+            );
+        }
+        assert_eq!(bus.read_u16(IO_REG_START + 0xDE).unwrap() & 0x8000, 0);
+        assert!(bus.take_dma_cycles() > 8);
+        assert_eq!(bus.take_dma_cycles(), 0);
+    }
+
+    #[test]
+    fn dma_zero_count_means_maximum_and_fixed_source_fills() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.write_u16(EWRAM_START, 0xABCD).unwrap();
+        // DMA0, count 0 => 0x4000 halfwords, fixed source.
+        program_dma(&mut bus, 0, EWRAM_START, IWRAM_START, 0, 0x8000 | (2 << 7));
+        assert_eq!(bus.read_u16(IWRAM_START).unwrap(), 0xABCD);
+        assert_eq!(bus.read_u16(IWRAM_START + 0x7FFE).unwrap(), 0xABCD);
+    }
+
+    #[test]
+    fn vblank_dma_waits_for_vblank_and_repeats_with_irq() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.write_u16(EWRAM_START, 0x1234).unwrap();
+        // 1 halfword, VBlank timing, repeat, IRQ, fixed destination.
+        let control = 0x8000 | (1 << 14) | (1 << 12) | (1 << 9) | (2 << 7) | (2 << 5);
+        program_dma(&mut bus, 1, EWRAM_START, IWRAM_START, 1, control);
+        assert_eq!(bus.read_u16(IWRAM_START).unwrap(), 0);
+
+        bus.advance(VBLANK_START_CYCLES + 1);
+        assert_eq!(bus.read_u16(IWRAM_START).unwrap(), 0x1234);
+        assert_ne!(bus.read_u16(IO_REG_START + 0x202).unwrap() & (1 << 9), 0);
+        assert_ne!(bus.read_u16(IO_REG_START + 0xC6).unwrap() & 0x8000, 0);
+
+        bus.write_u16(EWRAM_START, 0x5678).unwrap();
+        bus.advance(CYCLES_PER_FRAME);
+        assert_eq!(bus.read_u16(IWRAM_START).unwrap(), 0x5678);
+    }
+
+    #[test]
+    fn hblank_dma_runs_once_per_visible_scanline() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        for line in 0..3 {
+            bus.write_u16(EWRAM_START + line * 2, 0x100 + line as u16)
+                .unwrap();
+        }
+        // 1 halfword per HBlank, repeat, incrementing source and destination.
+        program_dma(
+            &mut bus,
+            2,
+            EWRAM_START,
+            IWRAM_START,
+            1,
+            0x8000 | (2 << 12) | (1 << 9),
+        );
+        bus.advance(CYCLES_PER_SCANLINE * 3);
+        for line in 0..3 {
+            assert_eq!(
+                bus.read_u16(IWRAM_START + line * 2).unwrap(),
+                0x100 + line as u16
+            );
+        }
+        assert_eq!(bus.read_u16(IWRAM_START + 6).unwrap(), 0);
+    }
+
+    #[test]
+    fn dma_address_registers_are_write_only() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.write_u32(IO_REG_START + 0xD4, 0x0200_0000).unwrap();
+        assert_eq!(bus.read_u32(IO_REG_START + 0xD4).unwrap(), 0);
+    }
+
+    #[test]
+    fn register_ram_reset_preserves_the_top_of_iwram() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.write_u32(IWRAM_START + 0x7FFC, 0xDEAD_BEEF).unwrap();
+        bus.write_u32(IWRAM_START, 0x1234).unwrap();
+        bus.register_ram_reset(2);
+        assert_eq!(bus.read_u32(IWRAM_START).unwrap(), 0);
+        assert_eq!(bus.read_u32(IWRAM_START + 0x7FFC).unwrap(), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn scanline_snapshots_precede_hblank_dma_register_updates() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        // HBlank DMA: one halfword per line from EWRAM into BG0VOFS (fixed dest).
+        bus.write_u16(EWRAM_START, 0x0005).unwrap();
+        bus.write_u16(EWRAM_START + 2, 0x0007).unwrap();
+        program_dma(
+            &mut bus,
+            0,
+            EWRAM_START,
+            IO_REG_START + 0x12,
+            1,
+            0x8000 | (2 << 12) | (1 << 9) | (2 << 5),
+        );
+        bus.advance(CYCLES_PER_SCANLINE * 2);
+
+        let lines = bus.take_scanlines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].line, 0);
+        // Line 0 was latched before its HBlank DMA wrote VOFS = 5.
+        assert_eq!(lines[0].registers[0x12], 0);
+        assert_eq!(lines[1].registers[0x12], 5);
+        assert_eq!(bus.io_regs[0x12], 7);
+        assert!(bus.take_scanlines().is_empty());
     }
 }

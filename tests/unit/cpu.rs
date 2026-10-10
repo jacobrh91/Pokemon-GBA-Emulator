@@ -148,23 +148,23 @@ fn cpu_with_rom(contents: &[u8]) -> (Cpu, MemoryBus) {
 }
 
 #[test]
-fn failed_fetch_enters_prefetch_abort_with_architectural_return_address() {
-    let (mut cpu, mut bus) = cpu_with_program(&[]);
-    cpu.registers[15] = 0;
+fn bios_region_reads_return_the_last_bios_opcode_instead_of_faulting() {
+    let (_, mut bus) = cpu_with_program(&[]);
+    assert_eq!(bus.read_u32(0).unwrap(), 0xE129_F000);
+    assert_eq!(bus.read_u8(0x0A).unwrap(), 0x29);
+    bus.set_bios_open_bus(0xE3A0_2004);
+    assert_eq!(bus.read_u32(0x3FFC).unwrap(), 0xE3A0_2004);
+}
 
-    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 3);
-    assert_eq!(cpu.mode(), MODE_ABORT);
-    assert_eq!(cpu.registers[14], 4);
-    assert_eq!(cpu.registers[15], VECTOR_PREFETCH_ABORT);
-    assert_eq!(cpu.saved_status().unwrap() & MODE_MASK, MODE_SUPERVISOR);
-    assert_eq!(cpu.cycles, 3);
-
-    let (mut arm_cpu, mut arm_bus) = cpu_with_arm_program(&[0xE1A0_0000]);
-    arm_cpu.registers[15] = 0;
-    assert_eq!(arm_cpu.step_arm(&mut arm_bus).unwrap(), 3);
-    assert_eq!(arm_cpu.mode(), MODE_ABORT);
-    assert_eq!(arm_cpu.registers[14], 4);
-    assert_eq!(arm_cpu.registers[15], VECTOR_PREFETCH_ABORT);
+#[test]
+fn unmapped_reads_return_the_last_fetched_opcode_and_writes_are_ignored() {
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE591_0000]); // LDR r0, [r1]
+    cpu.registers[1] = 0x1000_0000;
+    let mode = cpu.mode();
+    cpu.step_arm(&mut bus).unwrap();
+    assert_eq!(cpu.mode(), mode);
+    assert_eq!(cpu.registers[0], 0xE591_0000);
+    bus.write_u32(0x1000_0000, 0x1234).unwrap();
 }
 
 #[test]
@@ -228,14 +228,14 @@ fn thumb_word_and_byte_load_store_use_bus_memory() {
 }
 
 #[test]
-fn failed_thumb_memory_access_enters_data_abort() {
-    let (mut cpu, mut bus) = cpu_with_program(&[0x6808]);
+fn thumb_load_from_the_bios_region_reads_open_bus_without_aborting() {
+    let (mut cpu, mut bus) = cpu_with_program(&[0x6808]); // LDR r0, [r1]
     cpu.registers[1] = 0;
-
-    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 4);
-    assert_eq!(cpu.mode(), MODE_ABORT);
-    assert_eq!(cpu.registers[14], TEST_PROGRAM_ADDRESS + 8);
-    assert_eq!(cpu.registers[15], VECTOR_DATA_ABORT);
+    let mode = cpu.mode();
+    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 3);
+    assert_eq!(cpu.mode(), mode);
+    assert_eq!(cpu.registers[0], 0xE129_F000);
+    assert_eq!(cpu.registers[15], TEST_PROGRAM_ADDRESS + 2);
 }
 
 #[test]
@@ -300,12 +300,6 @@ fn exception_cycles_include_faulting_fetch_wait_states() {
     assert_eq!(thumb_cpu.step_thumb(&mut thumb_bus).unwrap(), 6);
     assert_eq!(thumb_cpu.mode(), MODE_UNDEFINED);
     assert_eq!(thumb_cpu.cycles, 6);
-
-    let (mut data_cpu, mut data_bus) = cpu_with_rom(&0xE591_0000u32.to_le_bytes());
-    data_cpu.registers[1] = 0;
-    assert_eq!(data_cpu.step_arm(&mut data_bus).unwrap(), 9);
-    assert_eq!(data_cpu.mode(), MODE_ABORT);
-    assert_eq!(data_cpu.cycles, 9);
 }
 
 #[test]
@@ -725,13 +719,13 @@ fn conditional_arm_swi_enters_exception_only_when_condition_passes() {
 
 #[test]
 fn irq_request_respects_mask_and_enters_banked_irq_mode() {
-    let (mut cpu, bus) = cpu_with_arm_program(&[]);
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[]);
     cpu.registers[13] = 0x1357;
     cpu.registers[15] = 0x0800_0100;
-    assert!(!cpu.request_irq(&bus).unwrap());
+    assert!(!cpu.request_irq(&mut bus).unwrap());
 
     cpu.cpsr &= !I_FLAG;
-    assert!(cpu.request_irq(&bus).unwrap());
+    assert!(cpu.request_irq(&mut bus).unwrap());
     assert_eq!(cpu.mode(), MODE_IRQ);
     assert_eq!(cpu.registers[13], 0);
     assert_eq!(cpu.registers[14], 0x0800_0104);
@@ -856,27 +850,13 @@ fn arm_ldm_with_s_and_pc_restores_spsr_and_thumb_state() {
 }
 
 #[test]
-fn arm_and_thumb_data_faults_enter_data_abort() {
-    let (mut arm_cpu, mut arm_bus) = cpu_with_arm_program(&[0xE591_0000]);
-    arm_cpu.registers[1] = 0;
-    let arm_status = arm_cpu.cpsr;
-
-    assert_eq!(arm_cpu.step_arm(&mut arm_bus).unwrap(), 4);
-    assert_eq!(arm_cpu.mode(), MODE_ABORT);
-    assert_eq!(arm_cpu.registers[14], TEST_PROGRAM_ADDRESS + 8);
-    assert_eq!(arm_cpu.registers[15], VECTOR_DATA_ABORT);
-    assert_eq!(arm_cpu.saved_status().unwrap(), arm_status);
-
-    let (mut thumb_cpu, mut thumb_bus) = cpu_with_program(&[0x6808]);
-    thumb_cpu.set_cpsr(MODE_SYSTEM | T_FLAG).unwrap();
-    thumb_cpu.registers[1] = 0;
-    let thumb_status = thumb_cpu.cpsr;
-
-    assert_eq!(thumb_cpu.step_thumb(&mut thumb_bus).unwrap(), 4);
-    assert_eq!(thumb_cpu.mode(), MODE_ABORT);
-    assert_eq!(thumb_cpu.registers[14], TEST_PROGRAM_ADDRESS + 8);
-    assert_eq!(thumb_cpu.registers[15], VECTOR_DATA_ABORT);
-    assert_eq!(thumb_cpu.saved_status().unwrap(), thumb_status);
+fn arm_load_from_the_bios_region_reads_open_bus_without_aborting() {
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE5D1_000A]); // LDRB r0, [r1, #10]
+    cpu.registers[1] = 0;
+    let mode = cpu.mode();
+    cpu.step_arm(&mut bus).unwrap();
+    assert_eq!(cpu.mode(), mode);
+    assert_eq!(cpu.registers[0], 0x29);
 }
 
 #[test]
@@ -1003,10 +983,11 @@ fn arm_block_transfers_load_store_multiple_registers_with_writeback() {
     cpu.registers[1] = 0x1122_3344;
     cpu.registers[2] = 0x5566_7788;
 
-    assert_eq!(cpu.step_arm(&mut bus).unwrap(), 2);
+    // STM: (n-1)S+2N, LDM: nS+1N+1I.
+    assert_eq!(cpu.step_arm(&mut bus).unwrap(), 3);
     assert_eq!(cpu.registers[0], TEST_PROGRAM_ADDRESS + 0x108);
     cpu.registers[0] = TEST_PROGRAM_ADDRESS + 0x100;
-    assert_eq!(cpu.step_arm(&mut bus).unwrap(), 3);
+    assert_eq!(cpu.step_arm(&mut bus).unwrap(), 4);
     assert_eq!(cpu.registers[3], 0x1122_3344);
     assert_eq!(cpu.registers[4], 0x5566_7788);
     assert_eq!(cpu.registers[0], TEST_PROGRAM_ADDRESS + 0x108);
@@ -1194,4 +1175,92 @@ fn thumb_software_interrupt_preserves_exception_vector_pc() {
     assert_eq!(cpu.registers[14], TEST_PROGRAM_ADDRESS + 2);
     assert_eq!(cpu.registers[15], 0x08);
     assert_eq!(cpu.saved_status().unwrap(), MODE_SYSTEM | T_FLAG);
+}
+
+#[test]
+fn arm_never_condition_is_skipped_instead_of_raising_undefined() {
+    // MOVNV r0, #7
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xF3A0_0007]);
+    cpu.registers[0] = 1;
+    let mode = cpu.mode();
+    assert_eq!(cpu.step_arm(&mut bus).unwrap(), 1);
+    assert_eq!(cpu.registers[0], 1);
+    assert_eq!(cpu.mode(), mode);
+    assert_eq!(cpu.registers[15], TEST_PROGRAM_ADDRESS + 4);
+}
+
+#[test]
+fn arm_multiply_cycles_depend_on_multiplier_magnitude() {
+    // MUL r0, r1, r2 repeated with different multipliers in r2.
+    for (multiplier, expected) in [
+        (0x0000_00FF, 2),
+        (0xFFFF_FF00, 2),
+        (0x0000_FFFF, 3),
+        (0x00FF_FFFF, 4),
+        (0x1234_5678, 5),
+    ] {
+        let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE000_0291]);
+        cpu.registers[1] = 3;
+        cpu.registers[2] = multiplier;
+        assert_eq!(cpu.step_arm(&mut bus).unwrap(), expected, "{multiplier:#X}");
+    }
+}
+
+#[test]
+fn arm_swap_costs_one_sequential_two_nonsequential_and_one_internal_cycle() {
+    // SWP r1, r3, [r2]
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE102_1093]);
+    cpu.registers[2] = 0x0300_0100;
+    assert_eq!(cpu.step_arm(&mut bus).unwrap(), 4);
+}
+
+#[test]
+fn halfword_loads_at_odd_addresses_rotate_or_sign_extend_the_byte() {
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[
+        0xE1D1_00B1, // LDRH  r0, [r1, #1]
+        0xE1D1_20F1, // LDRSH r2, [r1, #1]
+    ]);
+    bus.write_u16(0x0300_0100, 0x80F0).unwrap();
+    cpu.registers[1] = 0x0300_0100;
+    cpu.step_arm(&mut bus).unwrap();
+    cpu.step_arm(&mut bus).unwrap();
+    assert_eq!(cpu.registers[0], 0xF000_0080);
+    assert_eq!(cpu.registers[2], 0xFFFF_FF80);
+}
+
+#[test]
+fn halfword_load_with_matching_base_and_destination_keeps_loaded_value() {
+    // LDRH r1, [r1, #2]!
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE1F1_10B2]);
+    bus.write_u16(0x0300_0102, 0xBEEF).unwrap();
+    cpu.registers[1] = 0x0300_0100;
+    cpu.step_arm(&mut bus).unwrap();
+    assert_eq!(cpu.registers[1], 0xBEEF);
+}
+
+#[test]
+fn msr_cpsr_cannot_change_the_thumb_state_bit() {
+    // MSR cpsr_c, r0
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE121_F000]);
+    cpu.registers[0] = MODE_SYSTEM | T_FLAG;
+    cpu.step_arm(&mut bus).unwrap();
+    assert_eq!(cpu.cpsr & T_FLAG, 0);
+    assert_eq!(cpu.registers[15], TEST_PROGRAM_ADDRESS + 4);
+}
+
+#[test]
+fn thumb_load_multiple_and_pop_pc_use_datasheet_cycle_counts() {
+    // LDMIA r0!, {r1, r2} ; POP {r3, pc}
+    let (mut cpu, mut bus) = cpu_with_program(&[0xC806, 0xBD08]);
+    cpu.registers[0] = 0x0300_0100;
+    cpu.registers[13] = 0x0300_0200;
+    bus.write_u32(0x0300_0204, 0x0300_0000).unwrap();
+    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 4);
+    assert_eq!(cpu.step_thumb(&mut bus).unwrap(), 5);
+}
+
+#[test]
+fn bios_service_hooks_ignore_ordinary_code() {
+    let (mut cpu, mut bus) = cpu_with_arm_program(&[0xE1A0_0000]);
+    assert_eq!(cpu.step_bios_hle(&mut bus).unwrap(), None);
 }

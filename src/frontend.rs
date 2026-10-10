@@ -6,7 +6,6 @@ use std::error::Error;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const CYCLES_PER_FRAME: u64 = 1232 * 228;
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
 
 pub fn run(rom_path: &str) -> Result<(), Box<dyn Error>> {
@@ -26,10 +25,10 @@ pub fn run(rom_path: &str) -> Result<(), Box<dyn Error>> {
     let mut next_frame = Instant::now();
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        let cycle_start = emulator.cpu().cycles;
         let mut instructions = 0_u64;
 
-        while emulator.cpu().cycles.saturating_sub(cycle_start) < CYCLES_PER_FRAME {
+        // Run until the last visible scanline of the frame has been drawn.
+        while !emulator.take_frame_ready() {
             let pc = emulator.cpu().registers[15];
             if let Err(error) = emulator.step() {
                 return Err(format!(
@@ -40,7 +39,6 @@ pub fn run(rom_path: &str) -> Result<(), Box<dyn Error>> {
             instructions += 1;
         }
 
-        emulator.render_frame();
         for (output, pixel) in display_buffer.iter_mut().zip(emulator.ppu().framebuffer()) {
             *output = pixel_to_rgb(*pixel);
         }
