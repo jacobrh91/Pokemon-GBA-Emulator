@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io;
 
 mod dma;
+use crate::apu::{self, Apu};
 use dma::{DmaChannel, DmaTiming};
 
 pub const ROM_START: u32 = 0x0800_0000;
@@ -26,11 +27,15 @@ pub const BIOS_OPEN_BUS_RESET: u32 = 0xE129_F000;
 pub const BIOS_OPEN_BUS_AFTER_SWI: u32 = 0xE3A0_2004;
 /// Last opcode fetched after the BIOS IRQ handler returns.
 pub const BIOS_OPEN_BUS_AFTER_IRQ: u32 = 0xE25E_F004;
+const SOUNDBIAS: usize = 0x88;
+const SOUNDBIAS_DEFAULT_HIGH: u8 = 0x02;
 const DISPCNT: usize = 0x000;
 const DISPCNT_FORCED_BLANK: u8 = 0x80;
 const DISPSTAT: usize = 0x004;
 const VCOUNT: usize = 0x006;
 const KEYINPUT: usize = 0x130;
+const KEYCNT: usize = 0x132;
+const KEYPAD_IRQ_BIT: u8 = 1 << 4; // IF bit 12 (high byte bit 4)
 const CYCLES_PER_SCANLINE: u32 = 1232;
 const VBLANK_START_SCANLINE: u32 = 160;
 const TOTAL_SCANLINES: u32 = 228;
@@ -85,11 +90,14 @@ pub struct MemoryBus {
     pub vram: Box<[u8; 96 * 1024]>,
     pub oam: Box<[u8; 1024]>,
     pub save_ram: Box<[u8; 64 * 1024]>,
-    key_input: u16,
+    /// Currently pressed buttons (`input` bit layout, 1 = pressed).
+    pressed_buttons: u16,
+    keypad_irq_active: bool,
     display_cycles: u32,
     timers: [Timer; 4],
     dma: [DmaChannel; 4],
     dma_cycles: u32,
+    apu: Apu,
     /// Last value the CPU fetched; unmapped reads return it.
     open_bus: u32,
     scanlines: Vec<ScanlineSnapshot>,
@@ -106,6 +114,7 @@ impl MemoryBus {
         let mut io_regs = Box::new([0; 1024]);
         // The BIOS hands over with the display in forced blank.
         io_regs[DISPCNT] = DISPCNT_FORCED_BLANK;
+        io_regs[SOUNDBIAS + 1] = SOUNDBIAS_DEFAULT_HIGH;
 
         Ok(Self {
             rom,
@@ -116,11 +125,13 @@ impl MemoryBus {
             vram: Box::new([0; 96 * 1024]),
             oam: Box::new([0; 1024]),
             save_ram: Box::new([0xFF; 64 * 1024]),
-            key_input: 0x03FF,
+            pressed_buttons: 0,
+            keypad_irq_active: false,
             display_cycles: 0,
             timers: std::array::from_fn(|_| Timer::default()),
             dma: [DmaChannel::default(); 4],
             dma_cycles: 0,
+            apu: Apu::default(),
             open_bus: 0,
             scanlines: Vec::new(),
             bios_open_bus: BIOS_OPEN_BUS_RESET,
@@ -286,6 +297,7 @@ impl MemoryBus {
             % u64::from(CYCLES_PER_FRAME)) as u32;
 
         let mut cascade_ticks = 0;
+        let mut audio_overflows = [0u64; 2];
         for index in 0..4 {
             let control = self.timers[index].control;
             if control & (1 << 7) == 0 {
@@ -295,6 +307,9 @@ impl MemoryBus {
             if index > 0 && control & (1 << 2) != 0 {
                 let source_ticks = cascade_ticks;
                 cascade_ticks = self.advance_timer(index, source_ticks);
+                if index < 2 {
+                    audio_overflows[index] = cascade_ticks;
+                }
                 continue;
             }
             let prescaler = [1_u64, 64, 256, 1024][(control & 3) as usize];
@@ -302,7 +317,36 @@ impl MemoryBus {
             let ticks = accumulated / prescaler;
             self.timers[index].prescaler_cycles = (accumulated % prescaler) as u16;
             cascade_ticks = self.advance_timer(index, ticks);
+            if index < 2 {
+                audio_overflows[index] = cascade_ticks;
+            }
         }
+        self.advance_audio(cycles, audio_overflows);
+    }
+
+    /// Feeds timer 0/1 overflows to the Direct Sound FIFOs, refilling them
+    /// through special-timing DMA, then mixes audio for the elapsed cycles.
+    fn advance_audio(&mut self, cycles: u32, overflows: [u64; 2]) {
+        for (timer, count) in overflows.into_iter().enumerate() {
+            for _ in 0..count.min(64) {
+                let refill = self.apu.timer_overflow(timer, &self.io_regs[..]);
+                for (channel, wanted) in refill.into_iter().enumerate() {
+                    if wanted {
+                        self.trigger_fifo_dma(channel);
+                    }
+                }
+            }
+        }
+        self.apu.advance(cycles, &self.io_regs[..]);
+    }
+
+    pub fn audio_fifo_stats(&self) -> apu::FifoStats {
+        self.apu.fifo_stats()
+    }
+
+    /// Mixed stereo samples at [`apu::SAMPLE_RATE`] since the last call.
+    pub fn take_audio_samples(&mut self) -> Vec<[i16; 2]> {
+        self.apu.take_samples()
     }
 
     /// Raises display interrupts and starts VBlank/HBlank DMA for every
@@ -363,8 +407,29 @@ impl MemoryBus {
         std::mem::take(&mut self.scanlines)
     }
 
-    pub fn set_key_input(&mut self, pressed_keys: u16) {
-        self.key_input = pressed_keys & 0x03FF;
+    /// Sets the pressed buttons (see [`crate::input`]); KEYINPUT reads them
+    /// active-low. Raises the keypad interrupt when KEYCNT's condition
+    /// becomes true.
+    pub fn set_pressed_buttons(&mut self, pressed: u16) {
+        self.pressed_buttons = pressed & crate::input::ALL;
+        self.evaluate_keypad_irq();
+    }
+
+    fn evaluate_keypad_irq(&mut self) {
+        let control = u16::from_le_bytes([self.io_regs[KEYCNT], self.io_regs[KEYCNT + 1]]);
+        let selected = control & crate::input::ALL;
+        let satisfied = control & (1 << 14) != 0
+            && selected != 0
+            && if control & (1 << 15) != 0 {
+                // AND mode: every selected button held.
+                self.pressed_buttons & selected == selected
+            } else {
+                self.pressed_buttons & selected != 0
+            };
+        if satisfied && !self.keypad_irq_active {
+            self.io_regs[INTERRUPT_REQUEST + 1] |= KEYPAD_IRQ_BIT;
+        }
+        self.keypad_irq_active = satisfied;
     }
 
     pub fn register_ram_reset(&mut self, flags: u32) {
@@ -387,6 +452,7 @@ impl MemoryBus {
         if flags & 0x80 != 0 {
             self.io_regs.fill(0);
             self.io_regs[DISPCNT] = DISPCNT_FORCED_BLANK;
+            self.io_regs[SOUNDBIAS + 1] = SOUNDBIAS_DEFAULT_HIGH;
             self.timers = std::array::from_fn(|_| Timer::default());
             self.dma = [DmaChannel::default(); 4];
         }
@@ -458,6 +524,15 @@ impl MemoryBus {
             Region::Oam(offset) => self.oam[offset] = value,
             Region::SaveRam(offset) => self.save_ram[offset] = value,
             Region::Io(offset) => {
+                if (apu::FIFO_A..apu::FIFO_A + 8).contains(&offset) {
+                    self.apu.push_fifo((offset - apu::FIFO_A) / 4, value);
+                    return Ok(());
+                }
+                if (apu::WAVE_RAM..apu::WAVE_RAM + 16).contains(&offset) {
+                    self.apu
+                        .write_wave_ram(offset - apu::WAVE_RAM, value, &self.io_regs[..]);
+                    return Ok(());
+                }
                 if (VCOUNT..VCOUNT + 2).contains(&offset)
                     || (KEYINPUT..KEYINPUT + 2).contains(&offset)
                 {
@@ -470,6 +545,12 @@ impl MemoryBus {
                 }
                 self.update_timer_register(offset);
                 self.dma_register_written(offset);
+                if (KEYCNT..KEYCNT + 2).contains(&offset) {
+                    self.evaluate_keypad_irq();
+                }
+                if (apu::AUDIO_REGISTERS_START..apu::AUDIO_REGISTERS_END).contains(&offset) {
+                    self.apu.register_written(offset, &mut self.io_regs[..]);
+                }
             }
             Region::Rom(_) | Region::Bios | Region::OpenBus => {}
         }
@@ -490,17 +571,29 @@ impl MemoryBus {
         if dma::dma_register_is_write_only(offset) {
             return 0;
         }
+        if (apu::WAVE_RAM..apu::WAVE_RAM + 16).contains(&offset) {
+            return self
+                .apu
+                .read_wave_ram(offset - apu::WAVE_RAM, &self.io_regs[..]);
+        }
+        if (apu::FIFO_A..apu::FIFO_A + 8).contains(&offset) {
+            return 0;
+        }
+        if offset == 0x84 {
+            return (self.io_regs[offset] & 0x80) | self.apu.channel_status();
+        }
         if offset == VCOUNT {
             return (self.display_cycles / CYCLES_PER_SCANLINE) as u8;
         }
         if offset == VCOUNT + 1 {
             return 0;
         }
+        let key_input = !self.pressed_buttons & crate::input::ALL;
         if offset == KEYINPUT {
-            return self.key_input as u8;
+            return key_input as u8;
         }
         if offset == KEYINPUT + 1 {
-            return (self.key_input >> 8) as u8;
+            return (key_input >> 8) as u8;
         }
         if (TIMER_BASE..TIMER_BASE + 16).contains(&offset) {
             let timer_index = (offset - TIMER_BASE) / 4;
@@ -734,7 +827,7 @@ mod tests {
             0x03FF
         );
 
-        bus.set_key_input(0x03FE);
+        bus.set_pressed_buttons(crate::input::A);
         assert_eq!(
             bus.read_u16(IO_REG_START + KEYINPUT as u32).unwrap(),
             0x03FE
@@ -967,5 +1060,113 @@ mod tests {
         assert_eq!(lines[1].registers[0x12], 5);
         assert_eq!(bus.io_regs[0x12], 7);
         assert!(bus.take_scanlines().is_empty());
+    }
+
+    #[test]
+    fn timer_overflow_pops_the_fifo_and_special_dma_refills_it() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        // 32 bytes of audio data in EWRAM.
+        for index in 0..32 {
+            bus.write_u8(EWRAM_START + index, (index as u8).wrapping_add(1))
+                .unwrap();
+        }
+        // Sound on; FIFO A: 100%, both sides, timer 0.
+        bus.write_u8(IO_REG_START + 0x84, 0x80).unwrap();
+        bus.write_u16(IO_REG_START + 0x82, 0x0304).unwrap();
+        // DMA1: special timing, repeat, 32-bit, fixed destination FIFO A.
+        program_dma(
+            &mut bus,
+            1,
+            EWRAM_START,
+            IO_REG_START + 0xA0,
+            4,
+            0x8000 | (3 << 12) | (1 << 9) | (1 << 10) | (2 << 5),
+        );
+        // Nothing transferred until the FIFO requests data.
+        assert_eq!(bus.apu.fifo_len(0), 0);
+
+        // Timer 0: overflow every 512 cycles (reload 0xFE00), no prescaler.
+        bus.write_u16(IO_REG_START + 0x100, 0xFE00).unwrap();
+        bus.write_u16(IO_REG_START + 0x102, 0x0080).unwrap();
+        bus.advance(512);
+
+        // The first overflow found the FIFO empty, requested DMA, and four
+        // words (16 bytes) arrived.
+        assert_eq!(bus.apu.fifo_len(0), 16);
+        let samples = bus.take_audio_samples();
+        assert_eq!(samples.len(), 1);
+    }
+
+    #[test]
+    fn audio_registers_round_trip_and_fifo_reads_zero() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.write_u16(IO_REG_START + 0x80, 0xFF77).unwrap();
+        assert_eq!(bus.read_u16(IO_REG_START + 0x80).unwrap(), 0xFF77);
+        bus.write_u32(IO_REG_START + 0xA0, 0x7F7F_7F7F).unwrap();
+        assert_eq!(bus.read_u32(IO_REG_START + 0xA0).unwrap(), 0);
+        assert_eq!(bus.apu.fifo_len(0), 4);
+        bus.write_u8(IO_REG_START + 0x84, 0x80).unwrap();
+        assert_eq!(bus.read_u8(IO_REG_START + 0x84).unwrap() & 0x80, 0x80);
+    }
+
+    #[test]
+    fn keyinput_is_active_low_for_each_button() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.set_pressed_buttons(crate::input::START | crate::input::L);
+        let value = bus.read_u16(IO_REG_START + KEYINPUT as u32).unwrap();
+        assert_eq!(value, 0x03FF & !(1 << 3) & !(1 << 9));
+        bus.set_pressed_buttons(0);
+        assert_eq!(
+            bus.read_u16(IO_REG_START + KEYINPUT as u32).unwrap(),
+            0x03FF
+        );
+    }
+
+    fn keypad_flag(bus: &MemoryBus) -> bool {
+        bus.io_regs[INTERRUPT_REQUEST + 1] & KEYPAD_IRQ_BIT != 0
+    }
+
+    #[test]
+    fn keypad_irq_or_mode_fires_once_when_any_selected_button_is_pressed() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        let selected = crate::input::A | crate::input::B;
+        bus.write_u16(IO_REG_START + KEYCNT as u32, (1 << 14) | selected)
+            .unwrap();
+
+        bus.set_pressed_buttons(crate::input::START);
+        assert!(!keypad_flag(&bus));
+        bus.set_pressed_buttons(crate::input::B);
+        assert!(keypad_flag(&bus));
+
+        // Acknowledge; holding the button must not retrigger.
+        bus.write_u16(IO_REG_START + INTERRUPT_REQUEST as u32, 1 << 12)
+            .unwrap();
+        bus.set_pressed_buttons(crate::input::B | crate::input::START);
+        assert!(!keypad_flag(&bus));
+        // Release and press again.
+        bus.set_pressed_buttons(0);
+        bus.set_pressed_buttons(crate::input::A);
+        assert!(keypad_flag(&bus));
+    }
+
+    #[test]
+    fn keypad_irq_and_mode_requires_every_selected_button() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        let combo = crate::input::A | crate::input::B | crate::input::START | crate::input::SELECT;
+        bus.write_u16(IO_REG_START + KEYCNT as u32, (1 << 15) | (1 << 14) | combo)
+            .unwrap();
+        bus.set_pressed_buttons(crate::input::A | crate::input::B | crate::input::START);
+        assert!(!keypad_flag(&bus));
+        bus.set_pressed_buttons(combo);
+        assert!(keypad_flag(&bus));
+    }
+
+    #[test]
+    fn keypad_irq_is_disabled_without_the_enable_bit() {
+        let mut bus = bus_with_rom(&[0; 4]);
+        bus.write_u16(IO_REG_START + KEYCNT as u32, crate::input::A)
+            .unwrap();
+        bus.set_pressed_buttons(crate::input::A);
+        assert!(!keypad_flag(&bus));
     }
 }

@@ -46,7 +46,7 @@ fn run_armwrestler_test(rom: &str, menu_selection: u8, expected_test: u8, minimu
     emulator.initialize_gba_startup(ROM_START).unwrap();
 
     // Keep only Start pressed; holding every direction can change the menu selection.
-    emulator.memory_mut().set_key_input(0x03F7);
+    emulator.set_buttons(gba_emulator::input::START);
     let mut menu_selection_set = false;
 
     for instruction in 0..MAX_INSTRUCTIONS {

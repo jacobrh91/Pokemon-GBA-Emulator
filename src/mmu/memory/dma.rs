@@ -33,6 +33,7 @@ pub(super) enum DmaTiming {
     Immediate = 0,
     VBlank = 1,
     HBlank = 2,
+    Special = 3,
 }
 
 impl MemoryBus {
@@ -114,6 +115,21 @@ impl MemoryBus {
         }
     }
 
+    /// Runs the sound DMA channel (1 for FIFO A, 2 for FIFO B) whose
+    /// destination is the FIFO that just asked for data.
+    pub(super) fn trigger_fifo_dma(&mut self, fifo: usize) {
+        let target = IO_REG_START + (apu::FIFO_A + fifo * 4) as u32;
+        for channel in [1, 2] {
+            if self.dma[channel].active
+                && (self.dma_control(channel) >> CONTROL_TIMING_SHIFT) & 3
+                    == DmaTiming::Special as u16
+                && self.dma[channel].destination & !3 == target
+            {
+                self.run_dma(channel);
+            }
+        }
+    }
+
     /// Cycles the CPU was stalled by DMA since the last call.
     pub fn take_dma_cycles(&mut self) -> u32 {
         std::mem::take(&mut self.dma_cycles)
@@ -121,16 +137,26 @@ impl MemoryBus {
 
     fn run_dma(&mut self, channel: usize) {
         let control = self.dma_control(channel);
-        let words = control & CONTROL_WORDS != 0;
+        // Sound FIFO DMA: always four words to a fixed FIFO address.
+        let fifo_transfer = (control >> CONTROL_TIMING_SHIFT) & 3 == DmaTiming::Special as u16
+            && matches!(channel, 1 | 2);
+        let words = fifo_transfer || control & CONTROL_WORDS != 0;
         let unit: u32 = if words { 4 } else { 2 };
         let source_adjust = (control >> CONTROL_SOURCE_SHIFT) & 3;
-        let destination_adjust = (control >> CONTROL_DEST_SHIFT) & 3;
+        let destination_adjust = if fifo_transfer {
+            ADJUST_FIXED
+        } else {
+            (control >> CONTROL_DEST_SHIFT) & 3
+        };
         let DmaChannel {
             mut source,
             mut destination,
-            count,
+            mut count,
             ..
         } = self.dma[channel];
+        if fifo_transfer {
+            count = 4;
+        }
 
         // Two internal cycles to start, then a read and a write per unit.
         let mut cycles: u32 = 2;

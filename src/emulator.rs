@@ -87,6 +87,17 @@ impl Emulator {
         }
     }
 
+    /// Sets the held buttons (see [`crate::input`]) for subsequent steps.
+    pub fn set_buttons(&mut self, buttons: crate::input::Buttons) {
+        self.memory
+            .set_pressed_buttons(crate::input::without_opposing_directions(buttons));
+    }
+
+    /// Stereo audio samples (32768 Hz, `[left, right]`) mixed since the last call.
+    pub fn take_audio_samples(&mut self) -> Vec<[i16; 2]> {
+        self.memory.take_audio_samples()
+    }
+
     /// True once per frame, after the last visible scanline was drawn.
     pub fn take_frame_ready(&mut self) -> bool {
         std::mem::take(&mut self.frame_ready)
