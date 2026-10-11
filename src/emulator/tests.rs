@@ -1109,3 +1109,87 @@ fn the_encounter_cheat_is_off_until_its_row_is_on_and_leaves_other_games_alone()
     assert_eq!(encounter_answer(b"BPRE", 50, 10, other), 1);
     assert_eq!(encounter_answer(b"AXVE", 50, 10, no_encounters()), 1);
 }
+
+/// A ROM with the TM-lesson code at two places (the real bytes, the call
+/// replaced by `adds r2, r1, #0; nop`, which records the count the call would
+/// have been given). An ARM stub enters the first, and the second, with
+/// `r1 = 200` (a TM); `r2` ends up as the count.
+fn tm_rom(game_code: &[u8; 4], function: usize, entry: usize) -> std::path::PathBuf {
+    use crate::cheats::firered::tm::SIGNATURE;
+    let mut rom = vec![0u8; 0x8_3000];
+    let mut put = |offset: usize, word: u32| {
+        rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    put(0x00, 0xEA00_002E); // b 0xC0 (over the header)
+    put(0xC0, 0xE3A0_1000 | 200); // mov r1, #200        (the item, a TM)
+    put(0xC4, 0xE3A0_8403); // mov r8, #0x03000000 (a readable address)
+    put(0xC8, 0xE59F_3004); // ldr r3, [pc, #4]    (the word at 0xD4)
+    put(0xCC, 0xE12F_FF13); // bx  r3
+    put(0xD4, 0x0800_0000 + (function + entry) as u32 + 1); // Thumb entry
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    for (index, byte) in SIGNATURE.iter().enumerate() {
+        rom[function + index] = byte.unwrap_or(0);
+    }
+    let mut put16 = |offset: usize, half: u16| {
+        rom[offset..offset + 2].copy_from_slice(&half.to_le_bytes());
+    };
+    put16(function + 12, 0x1C0A); // adds r2, r1, #0   (the call's count)
+    put16(function + 14, 0x46C0); // nop
+    put16(function + 20, 0xE7FE); // b .
+    // A second copy elsewhere: the hook must cover both.
+    let second = function + 0x100;
+    for index in 0..SIGNATURE.len() + 2 {
+        rom[second + index] = rom[function + index];
+    }
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("gba-tm-test-{}-{id}.gba", std::process::id()));
+    std::fs::write(&path, rom).unwrap();
+    path
+}
+
+/// `r2` after running the TM-lesson code from the copy at `entry` (an offset
+/// from the first), and whether the scan found both.
+fn tm_count(game_code: &[u8; 4], entry: usize, options: CheatOptions) -> (u32, bool) {
+    let function = 0x8_2A00;
+    let path = tm_rom(game_code, function, entry);
+    let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    emulator.initialize_gba_startup(ROM_START).unwrap();
+    emulator.set_cheat_options(options);
+    for _ in 0..60 {
+        emulator.step().unwrap();
+    }
+    let scan = emulator.cheat_scan();
+    (
+        emulator.cpu().registers[2],
+        scan.tm_use_a.is_some() && scan.tm_use_b.is_some(),
+    )
+}
+
+#[test]
+fn tms_are_never_used_up_whatever_the_menu_says() {
+    // The game's own count is 1 (`movs r1, #1`); the hook makes it 0, at
+    // both places, with every option off and with others on.
+    let other = CheatOptions {
+        infinite_money: true,
+        no_encounters: true,
+        ..CheatOptions::default()
+    };
+    for entry in [0, 0x100] {
+        for options in [CheatOptions::default(), other] {
+            let (count, found) = tm_count(b"BPRE", entry, options);
+            assert!(found, "both sites are found");
+            assert_eq!(count, 0, "entry {entry:#X}");
+        }
+    }
+}
+
+#[test]
+fn other_games_still_use_up_their_items() {
+    for entry in [0, 0x100] {
+        let (count, found) = tm_count(b"AXVE", entry, CheatOptions::default());
+        assert!(!found);
+        assert_eq!(count, 1, "the game's own call is untouched");
+    }
+}

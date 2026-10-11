@@ -15,6 +15,7 @@
 //! | all experience is boosted | |
 //! | all Pokémon are shiny | |
 //! | no random encounters | |
+//! | TMs are infinitely usable | none: always on, shown ticked |
 //!
 //! Choosing a species or level, or a perfect-stats target, also
 //! switches its row on, so a choice never silently does nothing; unticking
@@ -82,8 +83,9 @@ pub(super) struct MenuLayout {
     pub(super) catch: Rect,
     pub(super) exp_boost: Rect,
     pub(super) shiny: Rect,
-    /// Last in the list.
     pub(super) no_encounters: Rect,
+    /// Last in the list: a cheat that is always on, so its box is only shown.
+    pub(super) always_on: Rect,
     /// The open species list, below the dropdown.
     pub(super) list: Rect,
 }
@@ -94,7 +96,7 @@ impl MenuLayout {
     pub(super) fn new(width: usize, dock: Rect, file_row: bool) -> Self {
         // The optional file row pushes every other row down by one.
         let extra = if file_row { 44 } else { 0 };
-        let panel_height = 388 + extra;
+        let panel_height = 432 + extra;
         let x = (dock.x + dock.width - PANEL_WIDTH)
             .min(width as i32 - PANEL_WIDTH - 12)
             .max(12);
@@ -123,6 +125,7 @@ impl MenuLayout {
         let row_exp = y + 258 + extra;
         let row_shiny = y + 302 + extra;
         let row_no_encounters = y + 346 + extra;
+        let row_always_on = y + 390 + extra;
 
         // Rows with controls of their own start after their checkbox.
         let wild_label = (left + LEAD, row_wild - text_h / 2);
@@ -192,6 +195,7 @@ impl MenuLayout {
             exp_boost: checkbox_at(left, row_exp),
             shiny: checkbox_at(left, row_shiny),
             no_encounters: checkbox_at(left, row_no_encounters),
+            always_on: checkbox_at(left, row_always_on),
             list: Rect {
                 x: dropdown.x,
                 y: dropdown.y + dropdown.height + 4,

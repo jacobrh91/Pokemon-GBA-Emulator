@@ -10,6 +10,22 @@ use gba_emulator::cheats::species;
 const SOON_COLOR: u32 = 0x008A_9299;
 /// Text of a row that is switched off (its choices stay visible).
 const OFF_COLOR: u32 = 0x00B4_BBC2;
+/// Colour of the ALWAYS ON tag (distinct from the SOON tag, which the menu's
+/// tests count).
+const ALWAYS_ON_COLOR: u32 = 0x007F_B89A;
+/// The tag of a cheat that is always on (it has no switch).
+pub(super) const ALWAYS_ON_TAG: &str = "ALWAYS ON";
+/// The check mark: down-right, then up-right, in 3x3 blocks.
+const CHECK_MARK: [(i32, i32); 8] = [
+    (5, 11),
+    (7, 13),
+    (9, 15),
+    (11, 17),
+    (13, 15),
+    (15, 13),
+    (17, 11),
+    (19, 9),
+];
 const PADDING: i32 = 24;
 const TEXT_HEIGHT: i32 = GLYPH_HEIGHT * TEXT_SCALE;
 
@@ -158,6 +174,29 @@ impl CheatMenu {
             CheatOption::NoEncounters,
             centre(layout.no_encounters),
         );
+        // Always on: ticked, dimmed, tagged, and not a control.
+        canvas.rounded_rect(layout.always_on, 6, TRACK_COLOR, 0.8);
+        for (dx, dy) in CHECK_MARK {
+            canvas.rect(
+                layout.always_on.x + dx - 1,
+                layout.always_on.y + dy - 4,
+                3,
+                3,
+                OFF_COLOR,
+            );
+        }
+        canvas.text(
+            "TMS ARE INFINITELY USABLE",
+            layout.always_on.x + layout.always_on.width + 12,
+            centre(layout.always_on) - TEXT_HEIGHT / 2,
+            OFF_COLOR,
+        );
+        canvas.text(
+            ALWAYS_ON_TAG,
+            right - text_width(ALWAYS_ON_TAG),
+            centre(layout.always_on) - TEXT_HEIGHT / 2,
+            ALWAYS_ON_COLOR,
+        );
 
         if self.dropdown_open() {
             self.draw_list(canvas, layout);
@@ -304,17 +343,7 @@ fn caret(canvas: &mut Canvas, x: i32, y: i32, colour: u32) {
 fn checkbox(canvas: &mut Canvas, rect: Rect, checked: bool) {
     if checked {
         canvas.rounded_rect(rect, 6, FILL_COLOR, 1.0);
-        // A check mark: down-right, then up-right, in 3x3 blocks.
-        for (dx, dy) in [
-            (5, 11),
-            (7, 13),
-            (9, 15),
-            (11, 17),
-            (13, 15),
-            (15, 13),
-            (17, 11),
-            (19, 9),
-        ] {
+        for (dx, dy) in CHECK_MARK {
             canvas.rect(rect.x + dx - 1, rect.y + dy - 4, 3, 3, DOCK_COLOR);
         }
     } else {

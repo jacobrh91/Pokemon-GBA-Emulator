@@ -62,6 +62,7 @@ fn the_panel_fits_the_window_and_holds_every_control() {
         "the panel sits above the dock"
     );
     for rect in [
+        layout.always_on,
         layout.no_encounters,
         layout.shiny,
         layout.wild_enable,
@@ -145,6 +146,7 @@ fn every_row_has_its_checkbox_in_one_column_at_the_left() {
         layout.exp_boost,
         layout.shiny,
         layout.no_encounters,
+        layout.always_on,
     ];
     for rect in column {
         assert_eq!(rect.x, column[0].x, "one column");
@@ -705,7 +707,7 @@ fn the_live_rows_are_untagged_and_the_still_inactive_rows_are_tagged() {
 }
 
 #[test]
-fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_then_no_encounters() {
+fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_no_encounters_then_always_on() {
     let layout = layout();
     let tops = [
         layout.dropdown.y,
@@ -715,9 +717,10 @@ fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_then_no_encounte
         layout.exp_boost.y,
         layout.shiny.y,
         layout.no_encounters.y,
+        layout.always_on.y,
     ];
     assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "{tops:?}");
-    // No encounters is last: nothing in the panel is below it.
+    // The always-on row is last: nothing in the panel is below it.
     for rect in [
         layout.dropdown,
         layout.perfect_dropdown,
@@ -725,9 +728,10 @@ fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_then_no_encounte
         layout.catch,
         layout.exp_boost,
         layout.shiny,
+        layout.no_encounters,
         layout.level_minus,
     ] {
-        assert!(rect.y < layout.no_encounters.y);
+        assert!(rect.y < layout.always_on.y);
     }
     // The perfect-stats dropdown shares its row with the row's label and
     // checkbox, to the right of both.
@@ -754,4 +758,34 @@ fn the_species_list_fits_inside_the_panel_with_eight_rows() {
     assert_eq!(LIST_VISIBLE_ROWS, 8);
     let layout = layout();
     assert!(layout.list.y + layout.list.height <= layout.panel.y + layout.panel.height);
+}
+
+#[test]
+fn the_always_on_row_is_shown_but_is_not_a_control() {
+    let layout = layout();
+    let mut menu = open_menu();
+    // Clicking its box or its text changes nothing and reports nothing.
+    for point in [
+        centre(layout.always_on),
+        (
+            (layout.always_on.x + 200) as f32,
+            centre(layout.always_on).1,
+        ),
+    ] {
+        click(&mut menu, &layout, point);
+        assert!(!menu.take_changed());
+        assert!(menu.options().is_default());
+    }
+    // It is drawn with its tag, in the tag colour, at the right of its row.
+    let mut drawn = vec![0u32; WIDTH * HEIGHT];
+    menu.draw(&mut Canvas::new(&mut drawn, WIDTH, HEIGHT, 0), &layout);
+    let mut single = vec![0u32; 400 * 40];
+    Canvas::new(&mut single, 400, 40, 0).text("ALWAYS ON", 4, 4, 0x007F_B89A);
+    let tag_pixels = single.iter().filter(|p| **p == 0x007F_B89A).count();
+    let row = layout.always_on;
+    let in_row = (row.y..row.y + row.height)
+        .flat_map(|y| (0..WIDTH).map(move |x| (x, y as usize)))
+        .filter(|&(x, y)| drawn[y * WIDTH + x] == 0x007F_B89A)
+        .count();
+    assert_eq!(in_row, tag_pixels, "the ALWAYS ON tag, once");
 }

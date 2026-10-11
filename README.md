@@ -65,6 +65,7 @@ game is played.
 | All experience is boosted | | **active** (FireRed); every Pokémon counts as traded (×1.5) |
 | All Pokémon are shiny | | **active** (FireRed) |
 | No random encounters | | **active** (FireRed) |
+| TMs are infinitely usable | | **always on** (FireRed): shown ticked at the bottom, with no switch |
 
 - **A row that is switched off keeps its choices**, shown dimmed, so you can
   turn it back on without choosing again.
@@ -129,6 +130,23 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 ("Gotcha! MEWTWO was caught!") with it on, on v1.0, v1.1 and the Japanese build.
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
+
+### Infinitely usable TMs (Pokémon FireRed)
+
+When a Pokémon has learned its move from a TM, the game takes the item out of
+the bag unless it is an HM (`RemoveBagItem(item, 1)`, guarded by "item is at
+most TM50"). The emulator sets the count of that call to 0, so the TM stays at
+its count. This cheat is **always on** while a FireRed ROM is recognised: it
+has no switch and the menu lists it last, ticked and tagged ALWAYS ON. The
+code appears twice in every build (one for each way of finishing the lesson:
+a free move slot, or replacing a move) and both places are hooked, found by a
+signature scan (`src/cheats/firered/tm.rs`). Selling or tossing a TM is not
+affected, only using it.
+
+Checked on v1.1 from the save state about to teach TM39 Rock Tomb to a Mewtwo:
+without the hook the game calls `RemoveBagItem(327, 1)`; with it the call is
+`RemoveBagItem(327, 0)`. The other builds have the same bytes (two matches
+each) but were not run in the game.
 
 ### No random encounters (Pokémon FireRed)
 
@@ -377,6 +395,7 @@ src/
       experience.rs    boosted experience (the OT ID IsTradedMon compares)
       money.rs         infinite money (the balance GetMoney returns)
       perfect_stats.rs perfect IVs (the fixed-IV local of the same routine)
+      tm.rs            infinitely usable TMs (the count of the bag removal; always on)
       shiny.rs         all Pokémon shiny (the PID, inside the routine that builds a Pokémon)
     options.rs       The cheat menu's options
     species.rs       Names of the 251 original species

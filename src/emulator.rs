@@ -73,6 +73,11 @@ pub struct Emulator {
     /// Where the no-random-encounters cheat is applied while it is on, or
     /// `NO_HOOK`.
     encounter_hook: u32,
+    /// The two calls that take a TM out of the bag, found by a signature scan
+    /// (see `cheats::firered::tm`); `None` if not recognised. The cheat is
+    /// always on, so these are the hooks themselves.
+    tm_use_a: Option<u32>,
+    tm_use_b: Option<u32>,
     /// Which of those cheats are on.
     make_shiny: bool,
     perfect_wild: bool,
@@ -112,6 +117,8 @@ impl Emulator {
             money_balance,
             exp_traded,
             encounter_roll,
+            tm_use_a,
+            tm_use_b,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         Ok(Self {
@@ -136,6 +143,8 @@ impl Emulator {
             exp_hook: NO_HOOK,
             encounter_roll,
             encounter_hook: NO_HOOK,
+            tm_use_a,
+            tm_use_b,
             make_shiny: false,
             perfect_wild: false,
             perfect_opponents: false,
@@ -219,6 +228,11 @@ impl Emulator {
         // the largest the game allows.
         if pc_before == self.money_hook {
             self.cpu.registers[0] = money::SHOWN_BALANCE;
+        }
+        // Infinitely usable TMs (always on): at the call that takes the TM
+        // out of the bag, ask for none of them.
+        if Some(pc_before) == self.tm_use_a || Some(pc_before) == self.tm_use_b {
+            self.cpu.registers[1] = 0;
         }
         // No random encounters: the dice roll's answer is always "no".
         if pc_before == self.encounter_hook {
@@ -533,6 +547,8 @@ impl Emulator {
             money_balance: self.money_balance,
             exp_traded: self.exp_traded,
             encounter_roll: self.encounter_roll,
+            tm_use_a: self.tm_use_a,
+            tm_use_b: self.tm_use_b,
         }
     }
 

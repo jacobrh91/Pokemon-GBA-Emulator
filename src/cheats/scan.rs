@@ -7,7 +7,7 @@
 //! "Not found" is remembered too, so a ROM that is not FireRed is not scanned
 //! again either.
 
-use super::firered::{catch_rate, encounters, experience, money, shiny, wild_species};
+use super::firered::{catch_rate, encounters, experience, money, shiny, tm, wild_species};
 
 /// Identifies a ROM image: `<length>-<hash>`, both in hex.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +51,9 @@ pub struct CheatScan {
     pub exp_traded: Option<u32>,
     /// The end of the wild-encounter dice roll (see [`encounters`]).
     pub encounter_roll: Option<u32>,
+    /// The two calls that take a TM out of the bag (see [`tm`]).
+    pub tm_use_a: Option<u32>,
+    pub tm_use_b: Option<u32>,
 }
 
 impl CheatScan {
@@ -64,6 +67,8 @@ impl CheatScan {
             money_balance: money::find(rom),
             exp_traded: experience::find(rom),
             encounter_roll: encounters::find(rom),
+            tm_use_a: tm::find(rom).map(|sites| sites[0]),
+            tm_use_b: tm::find(rom).map(|sites| sites[1]),
         }
     }
 
@@ -103,6 +108,8 @@ mod tests {
             money_balance: None,
             exp_traded: None,
             encounter_roll: None,
+            tm_use_a: None,
+            tm_use_b: None,
         };
         assert_eq!(CheatScan::for_rom(&rom, Some(&recorded)), recorded);
         let mut other = rom.clone();

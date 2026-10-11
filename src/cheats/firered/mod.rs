@@ -17,6 +17,8 @@
 //! * [`experience`]: replaces a value *in the middle of a routine* (the OT ID
 //!   the game compares with the player's), so that every Pokémon counts as
 //!   traded and earns the traded-Pokémon experience bonus.
+//! * [`tm`]: replaces an argument just before a call (the number of TMs the
+//!   game removes from the bag after a lesson), always on.
 //! * [`money`]: replaces the value returned by the function that reads the
 //!   balance, so that the game sees 999,999.
 //! * [`perfect_stats`]: the same place, to set the IVs (a local that the
@@ -84,6 +86,7 @@ pub mod experience;
 pub mod money;
 pub mod perfect_stats;
 pub mod shiny;
+pub mod tm;
 pub mod wild_species;
 
 /// Where the ROM appears on the bus.
@@ -102,6 +105,28 @@ fn find_in_firered(rom: &[u8], pattern: &[Option<u8>], offset: usize) -> Option<
         return None;
     }
     find_unique(rom, pattern).map(|found| ROM_BASE + (found + offset) as u32)
+}
+
+/// The bus addresses of every halfword-aligned match of `pattern` in `rom`
+/// (plus `offset`), in ascending order, if `rom` is a FireRed cartridge;
+/// empty otherwise.
+fn find_all_in_firered(rom: &[u8], pattern: &[Option<u8>], offset: usize) -> Vec<u32> {
+    let Some(game_code) = rom.get(0xAC..0xB0) else {
+        return Vec::new();
+    };
+    if !game_code.starts_with(GAME_CODE_PREFIX) || pattern.is_empty() || rom.len() < pattern.len() {
+        return Vec::new();
+    }
+    (0..=rom.len() - pattern.len())
+        .step_by(2)
+        .filter(|&at| {
+            pattern
+                .iter()
+                .zip(&rom[at..at + pattern.len()])
+                .all(|(want, byte)| want.is_none_or(|want| want == *byte))
+        })
+        .map(|at| ROM_BASE + (at + offset) as u32)
+        .collect()
 }
 
 /// The offset of `pattern` in `haystack` if it occurs exactly once at a
