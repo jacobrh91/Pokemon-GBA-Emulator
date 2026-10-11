@@ -7,7 +7,7 @@
 //! "Not found" is remembered too, so a ROM that is not FireRed is not scanned
 //! again either.
 
-use super::firered::{catch_rate, money, shiny, wild_species};
+use super::firered::{catch_rate, experience, money, shiny, wild_species};
 
 /// Identifies a ROM image: `<length>-<hash>`, both in hex.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +47,8 @@ pub struct CheatScan {
     pub shiny_point: Option<u32>,
     /// The return of `GetMoney` (see [`money`]).
     pub money_balance: Option<u32>,
+    /// Where `IsTradedMon` has fetched the OT ID (see [`experience`]).
+    pub exp_traded: Option<u32>,
 }
 
 impl CheatScan {
@@ -58,6 +60,7 @@ impl CheatScan {
             catch_check: catch_rate::find(rom),
             shiny_point: shiny::find(rom),
             money_balance: money::find(rom),
+            exp_traded: experience::find(rom),
         }
     }
 
@@ -95,6 +98,7 @@ mod tests {
             catch_check: None,
             shiny_point: None,
             money_balance: None,
+            exp_traded: None,
         };
         assert_eq!(CheatScan::for_rom(&rom, Some(&recorded)), recorded);
         let mut other = rom.clone();

@@ -12,6 +12,9 @@
 //!   catch odds, just before the game tests them).
 //! * [`shiny`]: replaces a value *in the middle of a routine* of the code that
 //!   builds every Pokémon (its personality value, so that it is shiny).
+//! * [`experience`]: replaces a value *in the middle of a routine* (the OT ID
+//!   the game compares with the player's), so that every Pokémon counts as
+//!   traded and earns the traded-Pokémon experience bonus.
 //! * [`money`]: replaces the value returned by the function that reads the
 //!   balance, so that the game sees 999,999.
 //! * [`perfect_stats`]: the same place, to set the IVs (a local that the
@@ -74,6 +77,7 @@
 //! its own signature.
 
 pub mod catch_rate;
+pub mod experience;
 pub mod money;
 pub mod perfect_stats;
 pub mod shiny;

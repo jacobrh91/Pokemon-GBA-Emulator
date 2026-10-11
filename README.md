@@ -62,7 +62,7 @@ game is played.
 | Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | **active** (FireRed) |
 | Infinite money | | **active** (FireRed) |
 | 100% catch rate | | **active** (FireRed) |
-| All experience is boosted | | not active yet (tagged SOON); the size of the boost is not decided |
+| All experience is boosted | | **active** (FireRed); every Pokémon counts as traded (×1.5) |
 | All Pokémon are shiny | | **active** (FireRed) |
 
 - **A row that is switched off keeps its choices**, shown dimmed, so you can
@@ -77,7 +77,7 @@ game is played.
 - **Wild encounters** are changed through the function hook described under
   *Wild species override*, in the FireRed builds listed there; they need no
   `.cheats` file.
-- **Rows tagged SOON** are stored and shown but do not change the game yet.
+- **Rows tagged SOON** would be stored and shown but not change the game yet; every row is active at present, so none is tagged.
 
 ## Cheats
 
@@ -128,6 +128,27 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 ("Gotcha! MEWTWO was caught!") with it on, on v1.0, v1.1 and the Japanese build.
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
+
+### Boosted experience (Pokémon FireRed)
+
+A Pokémon that was received in a trade earns 1.5 times the experience (the
+game shows "a boosted Exp. Points"). The game stores no "traded" flag: it
+compares the Pokémon's original-trainer ID with the player's own ID (and, if
+those match, the trainer's name with the player's). With the row on, the
+emulator treats every Pokémon of the player's as traded by giving it an ID that
+is not the player's, at the moment the game asks: `IsTradedMon` fetches the
+Pokémon's OT ID and the emulator inverts it before the comparison. Nothing is
+changed in the Pokémon, so the Pokémon already in the party are covered too,
+and the check is only made when experience is awarded, so obedience is not
+affected (the player's Pokémon do not start disobeying). The place is found by
+a signature scan (`src/cheats/firered/experience.rs`); the bonus itself is the
+game's, so it stacks with the Lucky Egg and the trainer-battle bonus as usual.
+
+Checked on v1.1 from the save state in a battle against a wild level-5 Pokémon
+with a level-95 Pokémon of the player's: the award was 41 points without the
+row and 61 with it (41 × 150 / 100, rounded down). A Pokémon that is level 100
+gains nothing either way. The other builds have the same bytes (the signature
+matches once in each) but were not run in the game.
 
 ### Infinite money (Pokémon FireRed)
 
@@ -336,6 +357,7 @@ src/
     firered/         Built-in FireRed cheats found by signature scan:
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
+      experience.rs    boosted experience (the OT ID IsTradedMon compares)
       money.rs         infinite money (the balance GetMoney returns)
       perfect_stats.rs perfect IVs (the fixed-IV local of the same routine)
       shiny.rs         all Pokémon shiny (the PID, inside the routine that builds a Pokémon)

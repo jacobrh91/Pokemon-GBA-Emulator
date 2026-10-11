@@ -1,5 +1,5 @@
 use crate::cheats::Cheats;
-use crate::cheats::firered::{money, perfect_stats, shiny};
+use crate::cheats::firered::{experience, money, perfect_stats, shiny};
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -61,6 +61,12 @@ pub struct Emulator {
     /// Where the infinite-money cheat is applied while it is on, or
     /// `NO_HOOK`.
     money_hook: u32,
+    /// Where `IsTradedMon` has fetched a Pokémon's OT ID, found by a signature
+    /// scan (see [`experience`]); `None` if not recognised.
+    exp_traded: Option<u32>,
+    /// Where the boosted-experience cheat is applied while it is on, or
+    /// `NO_HOOK`.
+    exp_hook: u32,
     /// Which of those cheats are on.
     make_shiny: bool,
     perfect_wild: bool,
@@ -98,6 +104,7 @@ impl Emulator {
             catch_check,
             shiny_point,
             money_balance,
+            exp_traded,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         Ok(Self {
@@ -118,6 +125,8 @@ impl Emulator {
             build_hook: NO_HOOK,
             money_balance,
             money_hook: NO_HOOK,
+            exp_traded,
+            exp_hook: NO_HOOK,
             make_shiny: false,
             perfect_wild: false,
             perfect_opponents: false,
@@ -201,6 +210,12 @@ impl Emulator {
         // the largest the game allows.
         if pc_before == self.money_hook {
             self.cpu.registers[0] = money::SHOWN_BALANCE;
+        }
+        // Boosted experience: the OT ID `IsTradedMon` is about to compare with
+        // the player's is made a different one, so the Pokémon counts as
+        // traded.
+        if pc_before == self.exp_hook {
+            self.cpu.registers[0] = experience::other_ot_id(self.cpu.registers[0]);
         }
         // All Pokémon shiny, perfect stats: while a Pokémon is being built.
         if pc_before == self.build_hook {
@@ -435,6 +450,11 @@ impl Emulator {
             Some(address) if self.cheat_options.catch_always => address,
             _ => NO_HOOK,
         };
+        // The experience row: hook the traded-Pokémon check.
+        self.exp_hook = match self.exp_traded {
+            Some(address) if self.cheat_options.exp_boost => address,
+            _ => NO_HOOK,
+        };
         // The infinite-money row: hook the end of the balance reader.
         self.money_hook = match self.money_balance {
             Some(address) if self.cheat_options.infinite_money => address,
@@ -493,6 +513,7 @@ impl Emulator {
             catch_check: self.catch_check,
             shiny_point: self.shiny_point,
             money_balance: self.money_balance,
+            exp_traded: self.exp_traded,
         }
     }
 

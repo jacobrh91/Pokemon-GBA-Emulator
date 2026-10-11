@@ -84,8 +84,8 @@ pub struct CheatOptions {
     pub infinite_money: bool,
     /// Every thrown ball catches (FireRed).
     pub catch_always: bool,
-    /// All experience gained is boosted. Not active yet (the size of the
-    /// boost is not decided).
+    /// All experience gained is boosted: every Pokémon is treated as a traded
+    /// one (FireRed).
     pub exp_boost: bool,
     /// The raw codes of the `.cheats` file are applied. Never saved: those
     /// codes patch the game's own routines and can crash it if they are on
@@ -118,6 +118,7 @@ impl CheatOptions {
                 | CheatOption::Shiny
                 | CheatOption::PerfectStats
                 | CheatOption::InfiniteMoney
+                | CheatOption::ExpBoost
         )
     }
 
@@ -168,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn only_experience_is_not_live_so_far() {
+    fn every_option_is_live() {
         use CheatOption::*;
         let live: Vec<_> = [
             Shiny,
@@ -190,7 +191,8 @@ mod tests {
                 WildLevel,
                 PerfectStats,
                 InfiniteMoney,
-                CatchAlways
+                CatchAlways,
+                ExpBoost
             ]
         );
     }

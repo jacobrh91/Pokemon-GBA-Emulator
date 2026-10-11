@@ -21,7 +21,8 @@
 //!
 //! Interaction ([`CheatMenu::update`]) is separate from drawing (`draw.rs`) so
 //! it can be tested without a window. Options that do not change the game yet
-//! (see [`CheatOptions::is_live`]) are tagged SOON in the panel.
+//! (see [`CheatOptions::is_live`]) are tagged SOON in the panel; at present
+//! every row is live.
 
 mod draw;
 
