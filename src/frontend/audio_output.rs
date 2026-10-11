@@ -107,11 +107,6 @@ impl AudioOutput {
         self.sink.set_gain(gain);
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn push(&self, samples: &[[i16; 2]]) {
-        self.sink.push(samples);
-    }
-
     fn build<T>(
         device: &cpal::Device,
         config: &StreamConfig,

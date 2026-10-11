@@ -2,7 +2,6 @@ mod alu;
 mod arm;
 mod bios;
 #[cfg(test)]
-#[path = "../../tests/unit/cpu.rs"]
 mod tests;
 mod thumb;
 use crate::cpu::alu::{

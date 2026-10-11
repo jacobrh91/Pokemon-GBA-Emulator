@@ -1,67 +1,19 @@
-use crate::audio_output::{AudioOutput, AudioSink};
-use crate::hud;
-use crate::volume_dock::{Pointer, VolumeDock};
-use crate::window_control;
+//! The emulation thread: runs the console flat out or paced by audio or the
+//! wall clock, and publishes finished frames, audio and speed measurements to
+//! the UI thread.
+
+use super::audio_output::AudioSink;
 use gba_emulator::apu::SAMPLE_RATE;
 use gba_emulator::emulator::Emulator;
-use gba_emulator::input::{self, Buttons};
 use gba_emulator::library;
-use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{Pixel, SCREEN_HEIGHT, SCREEN_WIDTH};
-use minifb::{Key, MouseMode, Scale, ScaleMode, Window, WindowOptions};
-use std::error::Error;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
-/// The game is upscaled in software so overlays can be drawn at window resolution.
-const DISPLAY_SCALE: usize = 4;
-const WINDOW_WIDTH: usize = SCREEN_WIDTH * DISPLAY_SCALE;
-const WINDOW_HEIGHT: usize = SCREEN_HEIGHT * DISPLAY_SCALE;
-const DEFAULT_VOLUME: f32 = 0.8;
-
-/// Keyboard layout: WASD = D-pad, Space = A, C = B, Q = L, E = R,
-/// X = Start, V = Select.
-const KEY_BINDINGS: [(Key, Buttons); 10] = [
-    (Key::Space, input::A),
-    (Key::C, input::B),
-    (Key::V, input::SELECT),
-    (Key::X, input::START),
-    (Key::D, input::RIGHT),
-    (Key::A, input::LEFT),
-    (Key::W, input::UP),
-    (Key::S, input::DOWN),
-    (Key::E, input::R),
-    (Key::Q, input::L),
-];
-
-/// What a press of Escape should do.
-#[derive(Debug, PartialEq, Eq)]
-enum EscapeAction {
-    None,
-    /// In full screen, Escape returns to the window instead of quitting.
-    LeaveFullscreen,
-    Quit,
-}
-
-fn escape_action(escape_pressed: bool, fullscreen: bool) -> EscapeAction {
-    match (escape_pressed, fullscreen) {
-        (false, _) => EscapeAction::None,
-        (true, true) => EscapeAction::LeaveFullscreen,
-        (true, false) => EscapeAction::Quit,
-    }
-}
-
-fn buttons_from_keys(is_down: impl Fn(Key) -> bool) -> Buttons {
-    KEY_BINDINGS
-        .iter()
-        .filter(|(key, _)| is_down(*key))
-        .fold(0, |buttons, (_, button)| buttons | button)
-}
-
 /// Audio the emulation thread keeps queued ahead of the device. Emulation is
 /// paced by this level rather than by the UI, so a stalled window (macOS Space
 /// swipes, dragging, resizing) cannot starve the audio.
@@ -87,202 +39,46 @@ fn speed_factor(frames: u32, elapsed: Duration) -> f32 {
     (f64::from(frames) / elapsed.as_secs_f64() / GBA_FRAMES_PER_SECOND) as f32
 }
 
-/// Holding either Shift key runs the game as fast as the machine allows.
-const FAST_FORWARD_KEYS: [Key; 2] = [Key::LeftShift, Key::RightShift];
-
-fn fast_forward_held(is_down: impl Fn(Key) -> bool) -> bool {
-    FAST_FORWARD_KEYS.iter().any(|key| is_down(*key))
-}
-
 /// State shared between the UI thread and the emulation thread.
-struct Shared {
-    buttons: AtomicU16,
-    running: AtomicBool,
+pub(super) struct Shared {
+    pub(super) buttons: AtomicU16,
+    pub(super) running: AtomicBool,
     /// Set while the fast-forward key is held.
-    fast_forward: AtomicBool,
+    pub(super) fast_forward: AtomicBool,
     /// Measured emulation speed as a multiple of real time (`f32` bits).
-    speed: AtomicU32,
+    pub(super) speed: AtomicU32,
     /// Fast-forward target as a multiple of real time; 0 means unthrottled.
-    fast_forward_target: AtomicU32,
+    pub(super) fast_forward_target: AtomicU32,
     /// Set by the UI to ask the emulation thread to restart the game.
-    restart: AtomicBool,
+    pub(super) restart: AtomicBool,
     /// Number of restarts performed so far.
-    restarts: AtomicU32,
+    pub(super) restarts: AtomicU32,
     /// Number of frames the emulation thread has published.
-    frames: AtomicU64,
+    pub(super) frames: AtomicU64,
     /// Latest finished frame as `0x00RRGGBB` pixels.
-    frame: Mutex<Vec<u32>>,
-    error: Mutex<Option<String>>,
+    pub(super) frame: Mutex<Vec<u32>>,
+    pub(super) error: Mutex<Option<String>>,
 }
 
-pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
-    let mut emulator = Emulator::new(rom_path)?;
-    emulator.initialize_gba_startup(ROM_START)?;
-    if let Some(image) = library::read_save(save_path)? {
-        emulator.load_save(&image);
-        eprintln!("loaded save {}", save_path.display());
-    }
-    eprintln!(
-        "backup memory: {:?}, save file {}",
-        emulator.save_kind(),
-        save_path.display()
-    );
-
-    let mut window = Window::new(
-        "GBA Emulator",
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
-        WindowOptions {
-            scale: Scale::X1,
-            // Resizable, with the picture scaled uniformly (bars, not
-            // stretching, when the window's shape differs).
-            resize: true,
-            scale_mode: ScaleMode::AspectRatioStretch,
-            ..WindowOptions::default()
-        },
-    )?;
-    // Native extras minifb lacks: keep the window frame itself at 3:2 while
-    // resizing, set a minimum size, and allow full screen.
-    window_control::lock_aspect_ratio(
-        &window,
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
-        WINDOW_WIDTH / 2,
-        WINDOW_HEIGHT / 2,
-    );
-    window_control::enable_fullscreen(&window);
-    // The window runs at the display's pace; emulation runs on its own thread.
-    window.set_target_fps(60);
-
-    let audio = match AudioOutput::new() {
-        Ok(audio) => Some(audio),
-        Err(error) => {
-            eprintln!("audio disabled: {error}");
-            None
-        }
-    };
-
-    let shared = Arc::new(Shared {
-        buttons: AtomicU16::new(0),
-        running: AtomicBool::new(true),
-        fast_forward: AtomicBool::new(false),
-        speed: AtomicU32::new(1.0_f32.to_bits()),
-        fast_forward_target: AtomicU32::new(0),
-        restart: AtomicBool::new(false),
-        restarts: AtomicU32::new(0),
-        frames: AtomicU64::new(0),
-        frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
-        error: Mutex::new(None),
-    });
-    let worker = {
-        let shared = Arc::clone(&shared);
-        let sink = audio.as_ref().map(AudioOutput::sink);
-        let save_path = save_path.to_path_buf();
-        thread::Builder::new()
-            .name("emulation".into())
-            .spawn(move || emulation_loop(emulator, sink, &shared, &save_path))?
-    };
-
-    let mut dock = VolumeDock::new(DEFAULT_VOLUME);
-    let mut frame_pixels = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
-    let mut display_buffer = vec![0; WINDOW_WIDTH * WINDOW_HEIGHT];
-    let mut result = Ok(());
-
-    while window.is_open() && shared.running.load(Ordering::Relaxed) {
-        // Escape leaves full screen first; only from a window does it quit.
-        let escape = window.is_key_pressed(Key::Escape, minifb::KeyRepeat::No);
-        match escape_action(escape, window_control::is_fullscreen(&window)) {
-            EscapeAction::None => {}
-            EscapeAction::LeaveFullscreen => window_control::toggle_fullscreen(&window),
-            EscapeAction::Quit => break,
-        }
-        shared.buttons.store(
-            buttons_from_keys(|key| window.is_key_down(key)),
-            Ordering::Relaxed,
-        );
-
-        let fast_forwarding = fast_forward_held(|key| window.is_key_down(key));
-        shared
-            .fast_forward
-            .store(fast_forwarding, Ordering::Relaxed);
-
-        if let Ok(frame) = shared.frame.lock() {
-            frame_pixels.copy_from_slice(&frame);
-        }
-        upscale(&frame_pixels, &mut display_buffer);
-
-        // The picture is scaled into the window, so the mouse position has to
-        // be mapped back to the 960x640 buffer the dock is drawn in. Ask the
-        // window system for the cursor relative to the picture view itself:
-        // minifb's own mouse values are computed against a rectangle that is
-        // wrong in full screen and after leaving it, and it clips against a
-        // window size it only refreshes when a resize drag ends.
-        let buffer_size = (WINDOW_WIDTH, WINDOW_HEIGHT);
-        let position = match window_control::pointer_in_picture_view(&window) {
-            Some((pointer, view_size)) => {
-                window_control::pointer_in_buffer(Some(pointer), view_size, buffer_size)
-            }
-            None => {
-                let (width, height) = window.get_size();
-                window_control::pointer_in_buffer(
-                    window.get_mouse_pos(MouseMode::Pass),
-                    (width as f32, height as f32),
-                    buffer_size,
-                )
-            }
-        };
-        let pointer = Pointer {
-            position,
-            // The window system's button state also covers clicks the window
-            // never received because it was not key yet (just after toggling
-            // full screen); the position check keeps clicks elsewhere out.
-            left_down: window.get_mouse_down(minifb::MouseButton::Left)
-                || (position.is_some() && window_control::left_button_down().unwrap_or(false)),
-            scroll: window.get_scroll_wheel().map_or(0.0, |(_, y)| y),
-        };
-        dock.update(pointer, WINDOW_WIDTH, WINDOW_HEIGHT);
-        if fast_forwarding {
-            let speed = f32::from_bits(shared.speed.load(Ordering::Relaxed));
-            hud::draw_fast_forward(&mut display_buffer, WINDOW_WIDTH, WINDOW_HEIGHT, speed);
-        }
-        dock.draw(&mut display_buffer, WINDOW_WIDTH, WINDOW_HEIGHT);
-        shared
-            .fast_forward_target
-            .store(dock.speed().multiple().unwrap_or(0), Ordering::Relaxed);
-        if dock.take_restart_request() {
-            shared.restart.store(true, Ordering::Relaxed);
-        }
-        let fullscreen_shortcut = window.is_key_pressed(Key::F11, minifb::KeyRepeat::No)
-            || (window.is_key_pressed(Key::F, minifb::KeyRepeat::No)
-                && (window.is_key_down(Key::LeftSuper) || window.is_key_down(Key::RightSuper)));
-        if dock.take_fullscreen_request() || fullscreen_shortcut {
-            window_control::toggle_fullscreen(&window);
-        }
-        if dock.take_quit_request() {
-            // Same path as Escape or closing the window: the emulation
-            // thread is joined and the save flushed below.
-            break;
-        }
-        if let Some(audio) = &audio {
-            audio.set_gain(dock.gain());
-        }
-        if let Err(error) = window.update_with_buffer(&display_buffer, WINDOW_WIDTH, WINDOW_HEIGHT)
-        {
-            result = Err(error.into());
-            break;
+impl Shared {
+    pub(super) fn new() -> Self {
+        Self {
+            buttons: AtomicU16::new(0),
+            running: AtomicBool::new(true),
+            fast_forward: AtomicBool::new(false),
+            speed: AtomicU32::new(1.0_f32.to_bits()),
+            fast_forward_target: AtomicU32::new(0),
+            restart: AtomicBool::new(false),
+            restarts: AtomicU32::new(0),
+            frames: AtomicU64::new(0),
+            frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
+            error: Mutex::new(None),
         }
     }
-
-    shared.running.store(false, Ordering::Relaxed);
-    let _ = worker.join();
-    if let Some(message) = shared.error.lock().ok().and_then(|mut error| error.take()) {
-        return Err(message.into());
-    }
-    result
 }
 
 /// Runs the emulator, publishing frames and audio until told to stop.
-fn emulation_loop(
+pub(super) fn emulation_loop(
     mut emulator: Emulator,
     sink: Option<AudioSink>,
     shared: &Shared,
@@ -434,19 +230,6 @@ fn flush_save(emulator: &mut Emulator, save_path: &Path) {
     }
 }
 
-/// Nearest-neighbour upscale of the 240x160 frame to the window buffer.
-fn upscale(framebuffer: &[u32], output: &mut [u32]) {
-    for (y, row) in framebuffer.chunks_exact(SCREEN_WIDTH).enumerate() {
-        let first = y * DISPLAY_SCALE * WINDOW_WIDTH;
-        for (x, rgb) in row.iter().enumerate() {
-            output[first + x * DISPLAY_SCALE..first + (x + 1) * DISPLAY_SCALE].fill(*rgb);
-        }
-        for line in 1..DISPLAY_SCALE {
-            output.copy_within(first..first + WINDOW_WIDTH, first + line * WINDOW_WIDTH);
-        }
-    }
-}
-
 fn pixel_to_rgb([red, green, blue, _]: Pixel) -> u32 {
     (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue)
 }
@@ -454,6 +237,8 @@ fn pixel_to_rgb([red, green, blue, _]: Pixel) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gba_emulator::mmu::ROM_START;
+    use std::sync::Arc;
 
     fn spin_rom() -> std::path::PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -478,18 +263,9 @@ mod tests {
         let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(path).unwrap();
         emulator.initialize_gba_startup(ROM_START).unwrap();
-        let shared = Arc::new(Shared {
-            buttons: AtomicU16::new(0),
-            running: AtomicBool::new(true),
-            fast_forward: AtomicBool::new(fast_forward),
-            speed: AtomicU32::new(1.0_f32.to_bits()),
-            fast_forward_target: AtomicU32::new(target),
-            restart: AtomicBool::new(false),
-            restarts: AtomicU32::new(0),
-            frames: AtomicU64::new(0),
-            frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
-            error: Mutex::new(None),
-        });
+        let shared = Arc::new(Shared::new());
+        shared.fast_forward.store(fast_forward, Ordering::Relaxed);
+        shared.fast_forward_target.store(target, Ordering::Relaxed);
         let worker = {
             let shared = Arc::clone(&shared);
             thread::spawn(move || {
@@ -541,18 +317,8 @@ mod tests {
         let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(path).unwrap();
         emulator.initialize_gba_startup(ROM_START).unwrap();
-        let shared = Arc::new(Shared {
-            buttons: AtomicU16::new(0),
-            running: AtomicBool::new(true),
-            fast_forward: AtomicBool::new(false),
-            speed: AtomicU32::new(0),
-            fast_forward_target: AtomicU32::new(0),
-            restart: AtomicBool::new(false),
-            restarts: AtomicU32::new(0),
-            frames: AtomicU64::new(0),
-            frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
-            error: Mutex::new(None),
-        });
+        let shared = Arc::new(Shared::new());
+        shared.speed.store(0, Ordering::Relaxed);
         let worker = {
             let shared = Arc::clone(&shared);
             thread::spawn(move || {
@@ -573,18 +339,9 @@ mod tests {
         let path = spin_rom();
         let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
         emulator.initialize_gba_startup(ROM_START).unwrap();
-        let shared = Arc::new(Shared {
-            buttons: AtomicU16::new(0),
-            running: AtomicBool::new(true),
-            fast_forward: AtomicBool::new(true),
-            speed: AtomicU32::new(0),
-            fast_forward_target: AtomicU32::new(0),
-            restart: AtomicBool::new(false),
-            restarts: AtomicU32::new(0),
-            frames: AtomicU64::new(0),
-            frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
-            error: Mutex::new(None),
-        });
+        let shared = Arc::new(Shared::new());
+        shared.fast_forward.store(true, Ordering::Relaxed);
+        shared.speed.store(0, Ordering::Relaxed);
         let sink = AudioSink::detached();
         sink.push(&[[1, 1]; 100]);
         let worker = {
@@ -643,23 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn escape_leaves_full_screen_and_only_quits_from_a_window() {
-        assert_eq!(escape_action(false, false), EscapeAction::None);
-        assert_eq!(escape_action(false, true), EscapeAction::None);
-        assert_eq!(escape_action(true, true), EscapeAction::LeaveFullscreen);
-        assert_eq!(escape_action(true, false), EscapeAction::Quit);
-    }
-
-    #[test]
-    fn either_shift_key_holds_fast_forward() {
-        assert!(fast_forward_held(|key| key == Key::LeftShift));
-        assert!(fast_forward_held(|key| key == Key::RightShift));
-        assert!(!fast_forward_held(|key| key == Key::Space));
-        // Shift is not a game button, so holding it never presses one.
-        assert_eq!(buttons_from_keys(|key| key == Key::LeftShift), 0);
-    }
-
-    #[test]
     fn fast_forward_runs_unthrottled_and_drops_audio() {
         // Pre-fill the queue above the pacing target so normal play must
         // wait on it every frame (bounded at 40 ms), and nothing drains it.
@@ -690,44 +430,6 @@ mod tests {
         assert!(
             fast_frames > paced_frames,
             "{fast_frames} fast vs {paced_frames} paced frames"
-        );
-    }
-
-    #[test]
-    fn keys_map_to_gba_buttons() {
-        let held = [Key::Space, Key::X, Key::A, Key::E];
-        let buttons = buttons_from_keys(|key| held.contains(&key));
-        assert_eq!(buttons, input::A | input::START | input::LEFT | input::R);
-
-        // Every binding maps to a distinct button, and the old arrow-key
-        // layout is no longer bound.
-        let all: Buttons = KEY_BINDINGS
-            .iter()
-            .fold(0, |mask, (_, button)| mask | button);
-        assert_eq!(all, input::ALL);
-        assert_eq!(
-            buttons_from_keys(|key| key == Key::Left || key == Key::Enter),
-            0
-        );
-        assert_eq!(buttons_from_keys(|_| false), 0);
-        assert_eq!(buttons_from_keys(|_| true), input::ALL);
-    }
-
-    #[test]
-    fn upscale_replicates_each_pixel_into_a_square_block() {
-        let mut frame = vec![0u32; SCREEN_WIDTH * SCREEN_HEIGHT];
-        frame[SCREEN_WIDTH + 2] = 0x0012_3456;
-        let mut output = vec![0; WINDOW_WIDTH * WINDOW_HEIGHT];
-        upscale(&frame, &mut output);
-        for dy in 0..DISPLAY_SCALE {
-            for dx in 0..DISPLAY_SCALE {
-                let index = (DISPLAY_SCALE + dy) * WINDOW_WIDTH + 2 * DISPLAY_SCALE + dx;
-                assert_eq!(output[index], 0x0012_3456);
-            }
-        }
-        assert_eq!(
-            output[(DISPLAY_SCALE) * WINDOW_WIDTH + 2 * DISPLAY_SCALE - 1],
-            0
         );
     }
 

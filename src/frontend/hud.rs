@@ -1,6 +1,6 @@
 //! On-screen status indicators drawn over the game.
 
-use crate::draw::{Canvas, GLYPH_HEIGHT, GLYPH_WIDTH, Rect, TEXT_SCALE};
+use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, GLYPH_WIDTH, Rect, TEXT_SCALE};
 
 const MARGIN: i32 = 14;
 const PADDING_X: i32 = 12;

@@ -2,8 +2,8 @@
 //! addresses without CPU involvement (GBATEK "DMA Transfers", mGBA `dma.c`).
 
 use super::*;
+use crate::mmu::registers::{DMA_BASE, FIFO_A, INTERRUPT_REQUEST};
 
-const DMA_BASE: usize = 0xB0;
 const CHANNEL_STRIDE: usize = 12;
 /// Offset of the high byte of CNT_H, whose write may enable the channel.
 const CNT_H_HIGH_BYTE: usize = 11;
@@ -118,7 +118,7 @@ impl MemoryBus {
     /// Runs the sound DMA channel (1 for FIFO A, 2 for FIFO B) whose
     /// destination is the FIFO that just asked for data.
     pub(super) fn trigger_fifo_dma(&mut self, fifo: usize) {
-        let target = IO_REG_START + (apu::FIFO_A + fifo * 4) as u32;
+        let target = IO_REG_START + (FIFO_A + fifo * 4) as u32;
         for channel in [1, 2] {
             if self.dma[channel].active
                 && (self.dma_control(channel) >> CONTROL_TIMING_SHIFT) & 3
