@@ -7,6 +7,7 @@
 //! starting.
 
 use crate::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget};
+use crate::cheats::scan::{CheatScan, RomFingerprint};
 use crate::cheats::species;
 use crate::game_library;
 use std::fs;
@@ -42,6 +43,9 @@ pub struct Settings {
     pub state_jitter_frames: u32,
     /// The cheat menu's options, restored the next time the game is played.
     pub cheat_options: CheatOptions,
+    /// Where the built-in cheats hook in this game's ROM, found by the first
+    /// scan of it; `None` until that has happened.
+    pub cheat_scan: Option<CheatScan>,
 }
 
 impl Default for Settings {
@@ -54,6 +58,7 @@ impl Default for Settings {
             fast_forward: None,
             state_jitter_frames: DEFAULT_STATE_JITTER_FRAMES,
             cheat_options: CheatOptions::default(),
+            cheat_scan: None,
         }
     }
 }
@@ -88,6 +93,9 @@ impl Settings {
         // The perfect-stats target was two flags before it became one choice
         // of wild / opponents / both; old files are read into that choice.
         let (mut legacy_wild, mut legacy_opponents, mut target_seen) = (false, false, false);
+        // The scan is kept only when its fingerprint and both addresses (an
+        // address or `none`) are all present and well formed.
+        let (mut scan_rom, mut scan_wild, mut scan_catch) = (None, None, None);
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
             let Some((key, value)) = line.split_once('=') else {
@@ -152,6 +160,9 @@ impl Settings {
                         settings.cheat_options.wild_level = Some(level);
                     }
                 }
+                "cheat_scan_rom" => scan_rom = RomFingerprint::parse(value),
+                "cheat_scan_create_wild_mon" => scan_wild = parse_address(value),
+                "cheat_scan_catch_check" => scan_catch = parse_address(value),
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -163,6 +174,15 @@ impl Settings {
                 },
                 _ => {}
             }
+        }
+        if let (Some(rom), Some(create_wild_mon), Some(catch_check)) =
+            (scan_rom, scan_wild, scan_catch)
+        {
+            settings.cheat_scan = Some(CheatScan {
+                rom,
+                create_wild_mon,
+                catch_check,
+            });
         }
         let options = &mut settings.cheat_options;
         if !wild_switch_seen {
@@ -248,8 +268,36 @@ impl Settings {
             self.state_jitter_frames
         ));
         text.push_str(&self.cheat_options_text());
+        if let Some(scan) = &self.cheat_scan {
+            text.push_str(
+                "# Where the built-in cheats hook in this ROM (found by the first scan;\n",
+            );
+            text.push_str("# ignored, and scanned again, if the ROM changes).\n");
+            text.push_str(&format!("cheat_scan_rom = {}\n", scan.rom.as_str()));
+            for (key, address) in [
+                ("cheat_scan_create_wild_mon", scan.create_wild_mon),
+                ("cheat_scan_catch_check", scan.catch_check),
+            ] {
+                match address {
+                    Some(address) => text.push_str(&format!("{key} = {address:#010X}\n")),
+                    None => text.push_str(&format!("{key} = none\n")),
+                }
+            }
+        }
         text
     }
+}
+
+/// `Some(None)` for `none`, `Some(Some(address))` for a hex address, `None`
+/// for anything else.
+fn parse_address(value: &str) -> Option<Option<u32>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))?;
+    u32::from_str_radix(digits, 16).ok().map(Some)
 }
 
 fn set_flag(value: &str, target: &mut bool) {
@@ -280,6 +328,11 @@ mod tests {
                 infinite_money: true,
                 ..CheatOptions::default()
             },
+            cheat_scan: Some(CheatScan {
+                rom: RomFingerprint::of(&[1, 2, 3]),
+                create_wild_mon: Some(0x0808_29FC),
+                catch_check: None,
+            }),
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(
@@ -479,6 +532,29 @@ window_height = 50
                 .wild_level,
             Some(100)
         );
+    }
+
+    #[test]
+    fn an_incomplete_or_malformed_scan_is_dropped() {
+        let rom = RomFingerprint::of(&[9]);
+        let full = format!(
+            "cheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\n",
+            rom.as_str()
+        );
+        let scan = Settings::parse(&full).cheat_scan.unwrap();
+        assert_eq!(scan.create_wild_mon, Some(0x0800_1000));
+        assert_eq!(scan.catch_check, None);
+        for missing in 0..3 {
+            let partial: String = full
+                .lines()
+                .enumerate()
+                .filter(|(index, _)| *index != missing)
+                .map(|(_, line)| format!("{line}\n"))
+                .collect();
+            assert_eq!(Settings::parse(&partial).cheat_scan, None);
+        }
+        let bad = full.replace("0x08001000", "banana");
+        assert_eq!(Settings::parse(&bad).cheat_scan, None);
     }
 
     #[test]

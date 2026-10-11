@@ -5,6 +5,7 @@
 //! on exit, so an abnormal exit loses at most a second of changes.
 
 use gba_emulator::cheats::options::CheatOptions;
+use gba_emulator::cheats::scan::CheatScan;
 use gba_emulator::settings::{MAX_WINDOW_WIDTH, MIN_WINDOW_WIDTH, Settings};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -34,6 +35,12 @@ impl SettingsSync {
             candidate_frames: 0,
             last_write: Instant::now(),
         }
+    }
+
+    /// Remembers where the cheats hook in this ROM. A scan that differs from
+    /// the loaded one is written with the next save (or on exit).
+    pub(super) fn record_cheat_scan(&mut self, scan: CheatScan) {
+        self.current.cheat_scan = Some(scan);
     }
 
     #[cfg(test)]
@@ -127,6 +134,29 @@ mod tests {
         assert!(saved.muted);
         assert_eq!(saved.fast_forward, Some(4));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_new_cheat_scan_is_written_but_a_known_one_is_not() {
+        let (mut sync, path) = sync();
+        let scan = CheatScan::scan(&[0u8; 64]);
+        sync.record_cheat_scan(scan.clone());
+        sync.flush();
+        assert_eq!(
+            Settings::load(&path).unwrap().cheat_scan,
+            Some(scan.clone())
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        // Recording the scan the file already holds changes nothing.
+        let loaded = Settings {
+            cheat_scan: Some(scan.clone()),
+            ..Settings::default()
+        };
+        let mut known = SettingsSync::new(path.clone(), loaded);
+        known.record_cheat_scan(scan);
+        known.flush();
+        assert!(!path.exists());
     }
 
     #[test]

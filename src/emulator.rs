@@ -1,6 +1,6 @@
 use crate::cheats::Cheats;
-use crate::cheats::firered::{catch_rate, wild_species};
 use crate::cheats::options::CheatOptions;
+use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
 use crate::mmu::{MemoryBus, ROM_START};
 use crate::ppu::{Ppu, SCREEN_HEIGHT};
@@ -62,9 +62,19 @@ impl Emulator {
     /// Call `initialize_gba_startup` or set the CPU PC and execution mode
     /// before stepping.
     pub fn new(rom_path: &str) -> io::Result<Self> {
+        Self::with_cheat_scan(rom_path, None)
+    }
+
+    /// Like [`Emulator::new`], reusing the cheat hook addresses of an earlier
+    /// scan of this same ROM (as kept in the settings file) instead of
+    /// scanning again. A scan recorded for a different ROM is ignored.
+    pub fn with_cheat_scan(rom_path: &str, previous: Option<&CheatScan>) -> io::Result<Self> {
         let memory = MemoryBus::new(rom_path)?;
-        let create_wild_mon = wild_species::find(&memory.rom);
-        let catch_check = catch_rate::find(&memory.rom);
+        let CheatScan {
+            create_wild_mon,
+            catch_check,
+            ..
+        } = CheatScan::for_rom(&memory.rom, previous);
         Ok(Self {
             cpu: Cpu::default(),
             memory,
@@ -355,6 +365,15 @@ impl Emulator {
         if options != self.cheat_options {
             self.cheat_options = options;
             self.update_cheat_hook();
+        }
+    }
+
+    /// The hook addresses found in this ROM, for the settings file to keep.
+    pub fn cheat_scan(&self) -> CheatScan {
+        CheatScan {
+            rom: crate::cheats::scan::RomFingerprint::of(&self.memory.rom),
+            create_wild_mon: self.create_wild_mon,
+            catch_check: self.catch_check,
         }
     }
 

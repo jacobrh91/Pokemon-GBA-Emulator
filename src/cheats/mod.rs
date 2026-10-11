@@ -10,12 +10,16 @@
 //! * [`options`]: the state of the cheat menu (which built-in cheats are on,
 //!   and their settings), which is what drives the built-in kind.
 //!
+//! [`scan`] remembers where the built-in cheats hook in a ROM, so the
+//! signature scan runs only once per game.
+//!
 //! [`species`] holds the Pokémon names shared by the menu, the settings file
 //! and the cheats file.
 
 pub mod codebreaker;
 pub mod firered;
 pub mod options;
+pub mod scan;
 pub mod species;
 
 pub use codebreaker::Cheats;

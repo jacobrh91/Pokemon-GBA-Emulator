@@ -39,7 +39,23 @@ const STATE_NOTICE_FRAMES: u32 = 80;
 const RESTORE_FULLSCREEN_AFTER_FRAMES: u32 = 3;
 
 pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
-    let mut emulator = Emulator::new(rom_path)?;
+    let settings_path = Settings::path_for_rom(Path::new(rom_path));
+    // The save state (one slot) lives beside the ROM, like the settings.
+    let state_path = Path::new(rom_path).with_extension("state");
+    let settings = match Settings::load(&settings_path) {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!(
+                "could not read settings {}: {error}",
+                settings_path.display()
+            );
+            Settings::default()
+        }
+    };
+    // The settings remember where the cheats hook in this ROM, so the
+    // signature scan only runs the first time (or after the ROM changes).
+    let mut emulator = Emulator::with_cheat_scan(rom_path, settings.cheat_scan.as_ref())?;
+    let cheat_scan = emulator.cheat_scan();
     emulator.initialize_gba_startup(ROM_START)?;
     let cheats_path = Cheats::path_for_rom(Path::new(rom_path));
     match Cheats::load(&cheats_path) {
@@ -72,19 +88,6 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         save_path.display()
     );
 
-    let settings_path = Settings::path_for_rom(Path::new(rom_path));
-    // The save state (one slot) lives beside the ROM, like the settings.
-    let state_path = Path::new(rom_path).with_extension("state");
-    let settings = match Settings::load(&settings_path) {
-        Ok(settings) => settings,
-        Err(error) => {
-            eprintln!(
-                "could not read settings {}: {error}",
-                settings_path.display()
-            );
-            Settings::default()
-        }
-    };
     // Reopen at the size the window had last time (kept at the 3:2 ratio).
     let (initial_width, initial_height) =
         settings
@@ -181,6 +184,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     dock.set_speed(SpeedSetting::from_multiple(settings.fast_forward));
     let mut restore_fullscreen = settings.fullscreen;
     let mut sync = SettingsSync::new(settings_path, settings);
+    sync.record_cheat_scan(cheat_scan);
     let mut frames_shown = 0_u32;
     let mut last_state_notice = 0_u32;
     let mut state_notice_frames = 0_u32;
