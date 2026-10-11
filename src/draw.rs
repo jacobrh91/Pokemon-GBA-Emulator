@@ -147,6 +147,20 @@ impl Canvas<'_> {
         );
     }
 
+    /// Four corner brackets around a square, the usual "full screen" glyph.
+    pub(crate) fn corner_brackets(&mut self, cx: i32, cy: i32, half: i32, arm: i32, color: u32) {
+        for (sx, sy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+            let (corner_x, corner_y) = (cx + sx * half, cy + sy * half);
+            // Horizontal and vertical arms pointing inward from the corner.
+            let x0 = if sx < 0 { corner_x } else { corner_x - arm + 1 };
+            let y0 = if sy < 0 { corner_y } else { corner_y - 2 };
+            self.rect(x0, y0, arm, 3, color);
+            let x1 = if sx < 0 { corner_x } else { corner_x - 2 };
+            let y1 = if sy < 0 { corner_y } else { corner_y - arm + 1 };
+            self.rect(x1, y1, 3, arm, color);
+        }
+    }
+
     /// The standard power symbol: a ring open at the top with a vertical bar
     /// through the opening.
     pub(crate) fn power_symbol(&mut self, cx: i32, cy: i32, radius: i32, color: u32) {
@@ -310,5 +324,24 @@ mod tests {
         // ...and the ring itself is open on either side of it at the top.
         assert_eq!(buffer[18 * width + 24], 0);
         assert_eq!(buffer[18 * width + 36], 0);
+    }
+
+    #[test]
+    fn corner_brackets_mark_four_corners_and_leave_the_middle_empty() {
+        let (width, height) = (40, 40);
+        let mut buffer = vec![0u32; width * height];
+        Canvas::new(&mut buffer, width, height, 0).corner_brackets(20, 20, 10, 5, 1);
+
+        // Each corner and the start of each arm.
+        for (x, y) in [(10, 10), (14, 10), (10, 14), (30, 10), (26, 10), (30, 14)] {
+            assert_eq!(buffer[y * width + x], 1, "({x},{y})");
+        }
+        for (x, y) in [(10, 30), (30, 30), (14, 30), (30, 26)] {
+            assert_eq!(buffer[y * width + x], 1, "({x},{y})");
+        }
+        // Nothing between the corners or in the centre.
+        assert_eq!(buffer[10 * width + 20], 0);
+        assert_eq!(buffer[20 * width + 20], 0);
+        assert_eq!(buffer[20 * width + 10], 0);
     }
 }

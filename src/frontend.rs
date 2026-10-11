@@ -1,13 +1,14 @@
 use crate::audio_output::{AudioOutput, AudioSink};
 use crate::hud;
 use crate::volume_dock::{Pointer, VolumeDock};
+use crate::window_control;
 use gba_emulator::apu::SAMPLE_RATE;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::input::{self, Buttons};
 use gba_emulator::library;
 use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{Pixel, SCREEN_HEIGHT, SCREEN_WIDTH};
-use minifb::{Key, MouseMode, Scale, Window, WindowOptions};
+use minifb::{Key, MouseMode, Scale, ScaleMode, Window, WindowOptions};
 use std::error::Error;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -36,6 +37,23 @@ const KEY_BINDINGS: [(Key, Buttons); 10] = [
     (Key::E, input::R),
     (Key::Q, input::L),
 ];
+
+/// What a press of Escape should do.
+#[derive(Debug, PartialEq, Eq)]
+enum EscapeAction {
+    None,
+    /// In full screen, Escape returns to the window instead of quitting.
+    LeaveFullscreen,
+    Quit,
+}
+
+fn escape_action(escape_pressed: bool, fullscreen: bool) -> EscapeAction {
+    match (escape_pressed, fullscreen) {
+        (false, _) => EscapeAction::None,
+        (true, true) => EscapeAction::LeaveFullscreen,
+        (true, false) => EscapeAction::Quit,
+    }
+}
 
 fn buttons_from_keys(is_down: impl Fn(Key) -> bool) -> Buttons {
     KEY_BINDINGS
@@ -116,9 +134,23 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         WINDOW_HEIGHT,
         WindowOptions {
             scale: Scale::X1,
+            // Resizable, with the picture scaled uniformly (bars, not
+            // stretching, when the window's shape differs).
+            resize: true,
+            scale_mode: ScaleMode::AspectRatioStretch,
             ..WindowOptions::default()
         },
     )?;
+    // Native extras minifb lacks: keep the window frame itself at 3:2 while
+    // resizing, set a minimum size, and allow full screen.
+    window_control::lock_aspect_ratio(
+        &window,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        WINDOW_WIDTH / 2,
+        WINDOW_HEIGHT / 2,
+    );
+    window_control::enable_fullscreen(&window);
     // The window runs at the display's pace; emulation runs on its own thread.
     window.set_target_fps(60);
 
@@ -156,10 +188,14 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     let mut display_buffer = vec![0; WINDOW_WIDTH * WINDOW_HEIGHT];
     let mut result = Ok(());
 
-    while window.is_open()
-        && !window.is_key_down(Key::Escape)
-        && shared.running.load(Ordering::Relaxed)
-    {
+    while window.is_open() && shared.running.load(Ordering::Relaxed) {
+        // Escape leaves full screen first; only from a window does it quit.
+        let escape = window.is_key_pressed(Key::Escape, minifb::KeyRepeat::No);
+        match escape_action(escape, window_control::is_fullscreen(&window)) {
+            EscapeAction::None => {}
+            EscapeAction::LeaveFullscreen => window_control::toggle_fullscreen(&window),
+            EscapeAction::Quit => break,
+        }
         shared.buttons.store(
             buttons_from_keys(|key| window.is_key_down(key)),
             Ordering::Relaxed,
@@ -175,8 +211,28 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         upscale(&frame_pixels, &mut display_buffer);
 
+        // The picture is scaled into the window, so the mouse position has to
+        // be mapped back to the 960x640 buffer the dock is drawn in. Ask the
+        // window system for the cursor relative to the picture view itself:
+        // minifb's own mouse values are computed against a rectangle that is
+        // wrong in full screen and after leaving it, and it clips against a
+        // window size it only refreshes when a resize drag ends.
+        let buffer_size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+        let position = match window_control::pointer_in_picture_view(&window) {
+            Some((pointer, view_size)) => {
+                window_control::pointer_in_buffer(Some(pointer), view_size, buffer_size)
+            }
+            None => {
+                let (width, height) = window.get_size();
+                window_control::pointer_in_buffer(
+                    window.get_mouse_pos(MouseMode::Pass),
+                    (width as f32, height as f32),
+                    buffer_size,
+                )
+            }
+        };
         let pointer = Pointer {
-            position: window.get_mouse_pos(MouseMode::Discard),
+            position,
             left_down: window.get_mouse_down(minifb::MouseButton::Left),
             scroll: window.get_scroll_wheel().map_or(0.0, |(_, y)| y),
         };
@@ -191,6 +247,12 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
             .store(dock.speed().multiple().unwrap_or(0), Ordering::Relaxed);
         if dock.take_restart_request() {
             shared.restart.store(true, Ordering::Relaxed);
+        }
+        let fullscreen_shortcut = window.is_key_pressed(Key::F11, minifb::KeyRepeat::No)
+            || (window.is_key_pressed(Key::F, minifb::KeyRepeat::No)
+                && (window.is_key_down(Key::LeftSuper) || window.is_key_down(Key::RightSuper)));
+        if dock.take_fullscreen_request() || fullscreen_shortcut {
+            window_control::toggle_fullscreen(&window);
         }
         if dock.take_quit_request() {
             // Same path as Escape or closing the window: the emulation
@@ -574,6 +636,14 @@ mod tests {
         );
         assert!(four > two * 1.5 && four < two * 2.6, "4x {four} vs {two}");
         assert!(max > four * 1.5, "MAX {max} vs {four}");
+    }
+
+    #[test]
+    fn escape_leaves_full_screen_and_only_quits_from_a_window() {
+        assert_eq!(escape_action(false, false), EscapeAction::None);
+        assert_eq!(escape_action(false, true), EscapeAction::None);
+        assert_eq!(escape_action(true, true), EscapeAction::LeaveFullscreen);
+        assert_eq!(escape_action(true, false), EscapeAction::Quit);
     }
 
     #[test]

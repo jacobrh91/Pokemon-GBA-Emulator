@@ -1,4 +1,4 @@
-//! A control dock (power, restart, volume, fast-forward speed) that slides up from
+//! A control dock (power, restart, full screen, volume, fast-forward speed) that slides up from
 //! the bottom of the window whenever the mouse moves over it, and slides away
 //! again once the mouse has been still for a moment or leaves the window.
 //!
@@ -16,8 +16,9 @@ const HIDE_AFTER_IDLE_FRAMES: u32 = 150;
 const REVEAL_STEP: f32 = 0.18;
 const WHEEL_STEP: f32 = 0.05;
 
-const DOCK_WIDTH: i32 = 615;
+const DOCK_WIDTH: i32 = 663;
 const RESTART_SIZE: i32 = 38;
+const FULLSCREEN_SIZE: i32 = 38;
 const POWER_SIZE: i32 = 38;
 const POWER_COLOR: u32 = 0x00D9_3B3B;
 const POWER_SYMBOL_COLOR: u32 = 0x00FF_FFFF;
@@ -98,6 +99,7 @@ struct Layout {
     /// Separator after the power and restart buttons.
     restart_divider_x: i32,
     restart: Rect,
+    fullscreen: Rect,
     power: Rect,
 }
 
@@ -123,7 +125,13 @@ impl Layout {
             width: RESTART_SIZE,
             height: RESTART_SIZE,
         };
-        let restart_divider_x = restart.x + RESTART_SIZE + 13;
+        let fullscreen = Rect {
+            x: restart.x + RESTART_SIZE + 10,
+            y: center_y - FULLSCREEN_SIZE / 2,
+            width: FULLSCREEN_SIZE,
+            height: FULLSCREEN_SIZE,
+        };
+        let restart_divider_x = fullscreen.x + FULLSCREEN_SIZE + 13;
         let icon = Rect {
             x: restart_divider_x + 16,
             y: center_y - ICON_SIZE / 2,
@@ -154,6 +162,7 @@ impl Layout {
             speed_buttons,
             restart_divider_x,
             restart,
+            fullscreen,
             power,
         }
     }
@@ -171,6 +180,7 @@ pub struct VolumeDock {
     idle_frames: u32,
     restart_requested: bool,
     quit_requested: bool,
+    fullscreen_requested: bool,
 }
 
 impl VolumeDock {
@@ -186,7 +196,13 @@ impl VolumeDock {
             idle_frames: HIDE_AFTER_IDLE_FRAMES,
             restart_requested: false,
             quit_requested: false,
+            fullscreen_requested: false,
         }
+    }
+
+    /// True once per click of the full-screen button.
+    pub fn take_fullscreen_request(&mut self) -> bool {
+        std::mem::take(&mut self.fullscreen_requested)
     }
 
     /// True once per click of the power button (the app should exit).
@@ -266,6 +282,8 @@ impl VolumeDock {
                     self.quit_requested = true;
                 } else if layout.restart.contains(x, y) {
                     self.restart_requested = true;
+                } else if layout.fullscreen.contains(x, y) {
+                    self.fullscreen_requested = true;
                 } else if layout.icon.inflated(6).contains(x, y) {
                     self.muted = !self.muted;
                 } else if layout.track.inflated(KNOB_RADIUS).contains(x, y) {
@@ -407,6 +425,14 @@ impl VolumeDock {
             10,
             ICON_COLOR,
         );
+        canvas.rounded_rect(layout.fullscreen, 9, TRACK_COLOR, 0.55);
+        canvas.corner_brackets(
+            layout.fullscreen.x + layout.fullscreen.width / 2,
+            layout.fullscreen.y + layout.fullscreen.height / 2,
+            9,
+            7,
+            ICON_COLOR,
+        );
 
         // Percentage.
         let percent = if self.muted {
@@ -528,7 +554,8 @@ mod tests {
         let dock_right = layout.dock.x + layout.dock.width;
         assert!(layout.power.x >= dock_left);
         assert!(layout.restart.x > layout.power.x + layout.power.width);
-        assert!(layout.restart_divider_x > layout.restart.x + layout.restart.width);
+        assert!(layout.fullscreen.x > layout.restart.x + layout.restart.width);
+        assert!(layout.restart_divider_x > layout.fullscreen.x + layout.fullscreen.width);
         assert!(layout.icon.x > layout.restart_divider_x);
         // Volume text, then the speed divider, then the four speed buttons.
         let text_end = layout.text_x + 4 * (GLYPH_WIDTH + 1) * TEXT_SCALE;
@@ -773,5 +800,30 @@ mod tests {
             H,
         );
         assert_eq!(dock.speed(), SpeedSetting::X4);
+    }
+
+    #[test]
+    fn fullscreen_button_requests_a_toggle_once_per_click() {
+        let mut dock = VolumeDock::new(0.5);
+        settle(&mut dock, hover(480.0, H as f32 - 30.0));
+        let layout = Layout::new(W, H);
+        let (x, y) = (
+            layout.fullscreen.x as f32 + 10.0,
+            layout.fullscreen.y as f32 + 10.0,
+        );
+        assert!(!dock.take_fullscreen_request());
+
+        let press = Pointer {
+            position: Some((x, y)),
+            left_down: true,
+            scroll: 0.0,
+        };
+        dock.update(press, W, H);
+        assert!(dock.take_fullscreen_request());
+        dock.update(press, W, H);
+        assert!(!dock.take_fullscreen_request(), "holding does not repeat");
+        // It is neither a restart nor a quit.
+        assert!(!dock.take_restart_request());
+        assert!(!dock.take_quit_request());
     }
 }

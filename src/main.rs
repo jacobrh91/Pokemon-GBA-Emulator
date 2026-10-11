@@ -3,6 +3,7 @@ mod draw;
 mod frontend;
 mod hud;
 mod volume_dock;
+mod window_control;
 
 use gba_emulator::library::{InstallOutcome, LIBRARY_ENV, Library, sibling_save_path};
 use std::path::{Path, PathBuf};

@@ -48,11 +48,11 @@ fn main() {
         dock.update(click, w, h);
     }
     if let Ok(index) = std::env::var("SPEED") {
-        // Click speed button `index` (0=2X .. 3=MAX); the dock is 615 wide, the
-        // buttons start 345 px in and are spaced 64 px apart.
+        // Click speed button `index` (0=2X .. 3=MAX); the dock is 663 wide, the
+        // buttons start 393 px in and are spaced 64 px apart.
         let index: f32 = index.parse().unwrap();
-        let dock_x = (w as f32 - 615.0) / 2.0;
-        let x = dock_x + 345.0 + index * 64.0 + 20.0;
+        let dock_x = (w as f32 - 663.0) / 2.0;
+        let x = dock_x + 393.0 + index * 64.0 + 20.0;
         let y = h as f32 - 18.0 - 30.0;
         dock.update(
             Pointer {
