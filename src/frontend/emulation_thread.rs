@@ -3,6 +3,7 @@
 //! the UI thread.
 
 use super::audio_output::AudioSink;
+use super::load_jitter::{JitterBag, advance_frames};
 use gba_emulator::apu::SAMPLE_RATE;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::game_library;
@@ -63,6 +64,8 @@ pub(super) struct Shared {
     /// Set by the UI to ask for a save state operation ([`STATE_SAVE`] or
     /// [`STATE_LOAD`]); cleared by the emulation thread.
     pub(super) state_request: AtomicU8,
+    /// Upper bound of the random extra frames run after loading a state.
+    pub(super) load_jitter_frames: AtomicU32,
     /// The last completed state operation as `count << 2 | kind`
     /// ([`STATE_SAVED`] or [`STATE_LOADED`]); the count lets the UI notice a
     /// repeat of the same operation.
@@ -85,6 +88,7 @@ impl Shared {
             restart: AtomicBool::new(false),
             restarts: AtomicU32::new(0),
             state_request: AtomicU8::new(0),
+            load_jitter_frames: AtomicU32::new(0),
             state_notice: AtomicU32::new(0),
             frames: AtomicU64::new(0),
             frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
@@ -102,6 +106,7 @@ pub(super) fn emulation_loop(
     state_path: &Path,
 ) {
     let mut state_operations = 0_u32;
+    let mut jitter = JitterBag::new();
     let mut next_frame = Instant::now();
     let mut last_save_check = Instant::now();
     let mut last_publish = Instant::now();
@@ -135,6 +140,8 @@ pub(super) fn emulation_loop(
         match shared.state_request.swap(0, Ordering::Relaxed) {
             STATE_SAVE => {
                 if save_state(&emulator, state_path) {
+                    // A new state starts a fresh round of offsets.
+                    jitter.reset();
                     state_operations += 1;
                     shared
                         .state_notice
@@ -143,6 +150,19 @@ pub(super) fn emulation_loop(
             }
             STATE_LOAD => {
                 if load_state(&mut emulator, state_path) {
+                    // Replaying a state exactly would repeat the game's random
+                    // numbers, so run a few extra frames before handing back.
+                    let extra = jitter.next(shared.load_jitter_frames.load(Ordering::Relaxed));
+                    if let Err(error) = advance_frames(&mut emulator, extra) {
+                        if let Ok(mut slot) = shared.error.lock() {
+                            *slot = Some(format!(
+                                "emulation stopped after loading a save state: {error}"
+                            ));
+                        }
+                        shared.running.store(false, Ordering::Relaxed);
+                        flush_save(&mut emulator, save_path);
+                        return;
+                    }
                     if let Some(sink) = &sink {
                         sink.clear();
                     }

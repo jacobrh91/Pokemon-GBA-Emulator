@@ -12,6 +12,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_VOLUME: f32 = 0.8;
+/// Extra frames run, at most, after loading a save state so the game's random
+/// number generator is not replayed identically (see the frontend).
+pub const DEFAULT_STATE_JITTER_FRAMES: u32 = 30;
+pub const MAX_STATE_JITTER_FRAMES: u32 = 600;
 /// The window is kept at the console's 3:2 aspect ratio; these bound the
 /// restored width (in points).
 pub const MIN_WINDOW_WIDTH: u32 = 480;
@@ -31,6 +35,9 @@ pub struct Settings {
     pub window_size: Option<(u32, u32)>,
     /// Fast-forward target as a multiple of real time; `None` is unthrottled.
     pub fast_forward: Option<u32>,
+    /// Upper bound of the random number of extra frames run after loading a
+    /// save state; 0 replays states exactly.
+    pub state_jitter_frames: u32,
 }
 
 impl Default for Settings {
@@ -41,6 +48,7 @@ impl Default for Settings {
             fullscreen: false,
             window_size: None,
             fast_forward: None,
+            state_jitter_frames: DEFAULT_STATE_JITTER_FRAMES,
         }
     }
 }
@@ -93,6 +101,11 @@ impl Settings {
                         settings.fullscreen = fullscreen;
                     }
                 }
+                "state_jitter_frames" => {
+                    if let Ok(frames) = value.parse::<u32>() {
+                        settings.state_jitter_frames = frames.min(MAX_STATE_JITTER_FRAMES);
+                    }
+                }
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -128,6 +141,12 @@ impl Settings {
             None => "max".to_string(),
         };
         text.push_str(&format!("fast_forward = {speed}\n"));
+        text.push_str("# Random extra frames (at most) run after loading a save state, so the\n");
+        text.push_str("# game's random numbers differ each time; 0 replays states exactly.\n");
+        text.push_str(&format!(
+            "state_jitter_frames = {}\n",
+            self.state_jitter_frames
+        ));
         text
     }
 }
@@ -144,6 +163,7 @@ mod tests {
             fullscreen: true,
             window_size: Some((1200, 800)),
             fast_forward: Some(4),
+            state_jitter_frames: 12,
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(
@@ -170,6 +190,26 @@ window_height = 50
         assert!(settings.fullscreen);
         assert_eq!(settings.fast_forward, None);
         assert_eq!(settings.window_size, None, "too small to be restored");
+    }
+
+    #[test]
+    fn state_jitter_defaults_on_and_is_bounded() {
+        assert_eq!(
+            Settings::default().state_jitter_frames,
+            DEFAULT_STATE_JITTER_FRAMES
+        );
+        assert_eq!(
+            Settings::parse("state_jitter_frames = 0").state_jitter_frames,
+            0
+        );
+        assert_eq!(
+            Settings::parse("state_jitter_frames = 99999").state_jitter_frames,
+            MAX_STATE_JITTER_FRAMES
+        );
+        assert_eq!(
+            Settings::parse("state_jitter_frames = lots").state_jitter_frames,
+            DEFAULT_STATE_JITTER_FRAMES
+        );
     }
 
     #[test]

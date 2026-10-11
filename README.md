@@ -40,7 +40,8 @@ again at shutdown. A ROM run straight from a path keeps its save beside it as
 
 Per-game settings are kept in a plain-text file beside the ROM
 (`<ROM name>.settings`) and restored the next time the game is played: volume,
-mute, full screen, the windowed size and the fast-forward speed. The file is
+mute, full screen, the windowed size, the fast-forward speed and the
+save-state randomness range. The file is
 `key = value` lines (see `src/settings.rs`); unknown or invalid entries are
 ignored, and deleting it restores the defaults. Changes are written about once a
 second and at exit.
@@ -52,6 +53,34 @@ Press `0` to save the whole console to a state file beside the ROM
 replaces it. A floppy-disk icon in the top-right corner confirms a save, and the
 same disk with a circular arrow confirms a load. If there is no state yet, `1`
 does nothing (a note goes to the terminal).
+
+**Different outcomes each time.** Emulation is deterministic, so a restored
+state would replay identically: the same inputs on the same frame give the same
+result, including the game's random numbers. Gen 3 Pokémon keeps its generator
+in RAM and advances it every frame (in FireRed v1.0 it is the word at
+`0x03005000`, which changed on every one of 1,799 consecutive frames), so a
+failed catch would fail the same way on every reload.
+
+To avoid that, loading silently runs a random number of extra frames, 0 to 30 by
+default (half a second at most), before you get control back. The game's
+generator is then somewhere else for the same inputs. For example, one restored
+FireRed state read `0x8715E898` after 20 identical frames on every load without
+the extra frames, and five different values with them. The offsets come from a
+shuffled bag, so none repeats until all 31 have been used, and saving a new state
+starts a fresh round. This works for any game, since it only shifts time.
+
+Things to know:
+
+- **The game is slightly ahead of where you saved.** Up to half a second of game
+  time passes instantly on load. That is invisible in an idle menu (such as a
+  battle menu) but means a state saved in the middle of an animation resumes a
+  little further along.
+- **Buttons held during the extra frames are ignored.** They are run with no
+  input; your next input arrives after them.
+- **It changes where the generator is, not how the game uses it.** Outcomes still
+  follow the game's own odds.
+- **Turn it off for exact replays.** Set `state_jitter_frames` in the settings
+  file to `0` (the range is 0 to 600), for example for tool-assisted work.
 
 A state is only accepted for the game that made it, and a truncated or damaged
 file is rejected before anything changes, so a bad file never disturbs the

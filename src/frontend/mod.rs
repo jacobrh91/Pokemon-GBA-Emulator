@@ -4,6 +4,7 @@ mod draw;
 mod emulation_thread;
 mod hud;
 mod input;
+mod load_jitter;
 mod settings_sync;
 mod window_control;
 
@@ -109,6 +110,9 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     };
 
     let shared = Arc::new(Shared::new());
+    shared
+        .load_jitter_frames
+        .store(settings.state_jitter_frames, Ordering::Relaxed);
     let worker = {
         let shared = Arc::clone(&shared);
         let sink = audio.as_ref().map(AudioOutput::sink);
