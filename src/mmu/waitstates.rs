@@ -40,6 +40,37 @@ impl MemoryBus {
         }
     }
 
+    /// Wait cycles (cycles beyond the first) of a 16-bit instruction fetch.
+    #[inline]
+    pub fn fetch_wait_cycles_16(&self, address: u32, sequential: bool) -> u32 {
+        self.halfword_cycles(address, sequential).saturating_sub(1)
+    }
+
+    /// Wait cycles of a 32-bit instruction fetch.
+    #[inline]
+    pub fn fetch_wait_cycles_32(&self, address: u32, sequential: bool) -> u32 {
+        if matches!(address >> 24, 0x00 | 0x03 | 0x04 | 0x07) {
+            return 0;
+        }
+        (self.halfword_cycles(address, sequential)
+            + self.halfword_cycles(address.wrapping_add(2), true))
+        .saturating_sub(1)
+    }
+
+    /// Cycles of an 8-, 16- or 32-bit access (`width` 1, 2 or 4 bytes).
+    #[inline]
+    pub fn access_cycles(&self, address: u32, width: u8, sequential: bool) -> u32 {
+        if width <= 2 {
+            self.halfword_cycles(address, sequential)
+        } else if matches!(address >> 24, 0x00 | 0x03 | 0x04 | 0x07) {
+            1
+        } else {
+            self.halfword_cycles(address, sequential)
+                + self.halfword_cycles(address.wrapping_add(2), true)
+        }
+    }
+
+    #[inline]
     pub fn transfer_cycles(&self, address: u32, width: u8, sequential: bool) -> io::Result<u32> {
         match width {
             1 | 2 => Ok(self.halfword_cycles(address, sequential)),

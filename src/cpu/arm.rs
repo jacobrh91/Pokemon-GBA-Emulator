@@ -121,7 +121,186 @@ pub enum ArmOp {
     Unknown(u32),
 }
 
+/// Decodes a 32-bit ARM instruction. The class is chosen from bits 27..25
+/// first; only the encodings that share a class are told apart after that
+/// (see `decode_reference`, the straight-line equivalent the tests compare
+/// against).
 pub fn decode(instruction: u32) -> ArmOp {
+    let condition = (instruction >> 28) as u8;
+    if condition == 0xF {
+        return ArmOp::Unknown(instruction);
+    }
+
+    match (instruction >> 25) & 0b111 {
+        0b000 => decode_class_0(instruction, condition),
+        0b001 => {
+            if instruction & 0x0FB0_F000 == 0x0320_F000 {
+                return ArmOp::WriteStatusImmediate {
+                    condition,
+                    saved: instruction & (1 << 22) != 0,
+                    field_mask: ((instruction >> 16) & 0xF) as u8,
+                    immediate: (instruction & 0xFF) as u8,
+                    rotate: ((instruction >> 8) & 0xF) as u8,
+                };
+            }
+            ArmOp::DataProcessingImmediate {
+                condition,
+                opcode: ((instruction >> 21) & 0xF) as u8,
+                set_flags: instruction & (1 << 20) != 0,
+                rn: ((instruction >> 16) & 0xF) as u8,
+                rd: ((instruction >> 12) & 0xF) as u8,
+                immediate: (instruction & 0xFF) as u8,
+                rotate: ((instruction >> 8) & 0xF) as u8,
+            }
+        }
+        0b010 | 0b011 => ArmOp::SingleDataTransfer {
+            condition,
+            pre_index: instruction & (1 << 24) != 0,
+            add_offset: instruction & (1 << 23) != 0,
+            byte: instruction & (1 << 22) != 0,
+            writeback: instruction & (1 << 21) != 0,
+            load: instruction & (1 << 20) != 0,
+            rn: ((instruction >> 16) & 0xF) as u8,
+            rd: ((instruction >> 12) & 0xF) as u8,
+            offset_immediate: instruction & (1 << 25) == 0,
+            offset: (instruction & 0xFFF) as u16,
+            rm: (instruction & 0xF) as u8,
+            shift_type: ((instruction >> 5) & 0x3) as u8,
+            shift_amount: ((instruction >> 7) & 0x1F) as u8,
+        },
+        0b100 => ArmOp::BlockTransfer {
+            condition,
+            pre_index: instruction & (1 << 24) != 0,
+            add_offset: instruction & (1 << 23) != 0,
+            user_registers: instruction & (1 << 22) != 0,
+            writeback: instruction & (1 << 21) != 0,
+            load: instruction & (1 << 20) != 0,
+            rn: ((instruction >> 16) & 0xF) as u8,
+            register_list: instruction as u16,
+        },
+        0b101 => {
+            let raw_offset = instruction & 0x00FF_FFFF;
+            let signed_offset = ((raw_offset << 8) as i32) >> 6;
+            ArmOp::Branch {
+                condition,
+                link: instruction & (1 << 24) != 0,
+                offset: signed_offset,
+            }
+        }
+        0b111 if instruction & (1 << 24) != 0 => ArmOp::SoftwareInterrupt {
+            condition,
+            comment: instruction & 0x00FF_FFFF,
+        },
+        _ => ArmOp::Unknown(instruction),
+    }
+}
+
+/// Class 0 (bits 27..25 = 000): data processing with a register operand and
+/// everything that is squeezed into its unused encodings.
+fn decode_class_0(instruction: u32, condition: u8) -> ArmOp {
+    if instruction & 0x0FFF_FFF0 == 0x012F_FF10 {
+        return ArmOp::BranchExchange {
+            condition,
+            rm: (instruction & 0xF) as u8,
+        };
+    }
+    if instruction & 0x0FBF_0FFF == 0x010F_0000 {
+        return ArmOp::ReadStatus {
+            condition,
+            saved: instruction & (1 << 22) != 0,
+            rd: ((instruction >> 12) & 0xF) as u8,
+        };
+    }
+    if instruction & 0x0FB0_FFF0 == 0x0120_F000 {
+        return ArmOp::WriteStatusRegister {
+            condition,
+            saved: instruction & (1 << 22) != 0,
+            field_mask: ((instruction >> 16) & 0xF) as u8,
+            rm: (instruction & 0xF) as u8,
+        };
+    }
+    if instruction & 0x0FB0_0FF0 == 0x0100_0090 {
+        return ArmOp::Swap {
+            condition,
+            byte: instruction & (1 << 22) != 0,
+            rn: ((instruction >> 16) & 0xF) as u8,
+            rd: ((instruction >> 12) & 0xF) as u8,
+            rm: (instruction & 0xF) as u8,
+        };
+    }
+    if instruction & 0x0F80_00F0 == 0x0080_0090 {
+        return ArmOp::MultiplyLong {
+            condition,
+            signed: instruction & (1 << 22) != 0,
+            accumulate: instruction & (1 << 21) != 0,
+            set_flags: instruction & (1 << 20) != 0,
+            rd_hi: ((instruction >> 16) & 0xF) as u8,
+            rd_lo: ((instruction >> 12) & 0xF) as u8,
+            rs: ((instruction >> 8) & 0xF) as u8,
+            rm: (instruction & 0xF) as u8,
+        };
+    }
+    if instruction & 0x0FC0_00F0 == 0x0000_0090 {
+        return ArmOp::Multiply {
+            condition,
+            accumulate: instruction & (1 << 21) != 0,
+            set_flags: instruction & (1 << 20) != 0,
+            rd: ((instruction >> 16) & 0xF) as u8,
+            rn: ((instruction >> 12) & 0xF) as u8,
+            rs: ((instruction >> 8) & 0xF) as u8,
+            rm: (instruction & 0xF) as u8,
+        };
+    }
+    if instruction & 0x90 == 0x90 && instruction & 0x60 != 0 {
+        return ArmOp::HalfwordTransfer {
+            condition,
+            pre_index: instruction & (1 << 24) != 0,
+            add_offset: instruction & (1 << 23) != 0,
+            writeback: instruction & (1 << 21) != 0,
+            load: instruction & (1 << 20) != 0,
+            transfer_type: ((instruction >> 5) & 0x3) as u8,
+            rn: ((instruction >> 16) & 0xF) as u8,
+            rd: ((instruction >> 12) & 0xF) as u8,
+            immediate_offset: instruction & (1 << 22) != 0,
+            offset: (((instruction >> 4) & 0xF0) | (instruction & 0xF)) as u16,
+            rm: (instruction & 0xF) as u8,
+        };
+    }
+    if instruction & (1 << 4) == 0 {
+        return ArmOp::DataProcessingRegister {
+            condition,
+            opcode: ((instruction >> 21) & 0xF) as u8,
+            set_flags: instruction & (1 << 20) != 0,
+            rn: ((instruction >> 16) & 0xF) as u8,
+            rd: ((instruction >> 12) & 0xF) as u8,
+            rm: (instruction & 0xF) as u8,
+            shift_type: ((instruction >> 5) & 0x3) as u8,
+            shift_amount: ((instruction >> 7) & 0x1F) as u8,
+            shift_by_register: false,
+            rs: 0,
+        };
+    }
+    if instruction & (1 << 7) == 0 {
+        return ArmOp::DataProcessingRegister {
+            condition,
+            opcode: ((instruction >> 21) & 0xF) as u8,
+            set_flags: instruction & (1 << 20) != 0,
+            rn: ((instruction >> 16) & 0xF) as u8,
+            rd: ((instruction >> 12) & 0xF) as u8,
+            rm: (instruction & 0xF) as u8,
+            shift_type: ((instruction >> 5) & 0x3) as u8,
+            shift_amount: 0,
+            shift_by_register: true,
+            rs: ((instruction >> 8) & 0xF) as u8,
+        };
+    }
+    ArmOp::Unknown(instruction)
+}
+
+/// The straight-line decoder the table above replaced, kept to check it
+/// against.
+#[cfg(test)]
+fn decode_reference(instruction: u32) -> ArmOp {
     let condition = (instruction >> 28) as u8;
     if condition == 0xF {
         return ArmOp::Unknown(instruction);
@@ -299,6 +478,7 @@ impl Cpu {
     /// Fetches and executes one supported ARM instruction.
     ///
     /// Returns instruction cycles including estimated memory wait states.
+    #[inline(never)]
     pub fn step_arm(&mut self, bus: &mut MemoryBus) -> io::Result<u32> {
         let pc = self.registers[15];
         if pc & 3 != 0 {
@@ -325,27 +505,10 @@ impl Cpu {
         };
         bus.set_open_bus(instruction);
         let fetch_sequential = self.sequential_fetch == Some((pc, false));
-        let fetch_wait_cycles = bus
-            .transfer_cycles(pc, 4, fetch_sequential)?
-            .saturating_sub(1);
+        let fetch_wait_cycles = bus.fetch_wait_cycles_32(pc, fetch_sequential);
         let op = arm::decode(instruction);
-        let condition = match &op {
-            ArmOp::DataProcessingImmediate { condition, .. }
-            | ArmOp::DataProcessingRegister { condition, .. }
-            | ArmOp::SingleDataTransfer { condition, .. }
-            | ArmOp::HalfwordTransfer { condition, .. }
-            | ArmOp::BlockTransfer { condition, .. }
-            | ArmOp::Multiply { condition, .. }
-            | ArmOp::MultiplyLong { condition, .. }
-            | ArmOp::ReadStatus { condition, .. }
-            | ArmOp::WriteStatusRegister { condition, .. }
-            | ArmOp::WriteStatusImmediate { condition, .. }
-            | ArmOp::Swap { condition, .. }
-            | ArmOp::BranchExchange { condition, .. }
-            | ArmOp::Branch { condition, .. }
-            | ArmOp::SoftwareInterrupt { condition, .. } => *condition,
-            ArmOp::Unknown(instruction) => (instruction >> 28) as u8,
-        };
+        // Every encoding carries its condition in the top four bits.
+        let condition = (instruction >> 28) as u8;
         let condition_passed = self.condition_passed(condition);
         let refills_pipeline = match &op {
             ArmOp::Branch { .. }
@@ -395,44 +558,17 @@ impl Cpu {
         } else {
             fetch_wait_cycles
         };
-        let instruction_cycles = base_cycles
-            .checked_add(wait_cycles)
-            .ok_or_else(|| io::Error::other("instruction cycle count overflow"))?;
-        let total_cycles = self
-            .cycles
-            .checked_add(u64::from(instruction_cycles))
-            .ok_or_else(|| io::Error::other("CPU cycle counter overflow"))?;
+        // Fail before executing, so a counter overflow has no side effects.
+        if self.cycles > u64::MAX - MAX_INSTRUCTION_CYCLES {
+            return Err(io::Error::other("CPU cycle counter overflow"));
+        }
+        let instruction_cycles = base_cycles.saturating_add(wait_cycles);
+        let total_cycles = self.cycles + u64::from(instruction_cycles);
 
         let instruction_status = self.cpsr;
         if condition_passed {
             if let Err(error) = self.execute_arm(op, pc, bus) {
-                let (mode, vector, return_address, cycles) = if is_memory_fault(&error) {
-                    (
-                        MODE_ABORT,
-                        VECTOR_DATA_ABORT,
-                        pc.wrapping_add(8),
-                        exception_entry_cycles(4, fetch_wait_cycles)?,
-                    )
-                } else if matches!(
-                    error.kind(),
-                    io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
-                ) {
-                    (
-                        MODE_UNDEFINED,
-                        VECTOR_UNDEFINED,
-                        pc.wrapping_add(4),
-                        exception_entry_cycles(3, fetch_wait_cycles)?,
-                    )
-                } else {
-                    return Err(error);
-                };
-                return self.take_exception(
-                    mode,
-                    vector,
-                    return_address,
-                    instruction_status,
-                    cycles,
-                );
+                return self.arm_fault(error, pc, fetch_wait_cycles, instruction_status);
             }
         } else {
             self.registers[15] = pc.wrapping_add(4);
@@ -444,6 +580,39 @@ impl Cpu {
             Some((pc.wrapping_add(4), false))
         };
         Ok(instruction_cycles)
+    }
+
+    /// What an instruction that failed turns into (see `thumb_fault`).
+    #[cold]
+    #[inline(never)]
+    fn arm_fault(
+        &mut self,
+        error: io::Error,
+        pc: u32,
+        fetch_wait_cycles: u32,
+        instruction_status: u32,
+    ) -> io::Result<u32> {
+        let (mode, vector, return_address, cycles) = if is_memory_fault(&error) {
+            (
+                MODE_ABORT,
+                VECTOR_DATA_ABORT,
+                pc.wrapping_add(8),
+                exception_entry_cycles(4, fetch_wait_cycles)?,
+            )
+        } else if matches!(
+            error.kind(),
+            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
+        ) {
+            (
+                MODE_UNDEFINED,
+                VECTOR_UNDEFINED,
+                pc.wrapping_add(4),
+                exception_entry_cycles(3, fetch_wait_cycles)?,
+            )
+        } else {
+            return Err(error);
+        };
+        self.take_exception(mode, vector, return_address, instruction_status, cycles)
     }
 
     /// Internal + sequential/non-sequential cycles with zero-wait memory
@@ -1242,13 +1411,10 @@ impl Cpu {
             self.registers[15] = instruction_pc.wrapping_add(4);
         }
         if writes_flags && restored_cpsr.is_none() {
-            self.set_flag(N_FLAG, result & 0x8000_0000 != 0);
-            self.set_flag(Z_FLAG, result == 0);
             if let Some((carry, overflow)) = arithmetic_flags {
-                self.set_flag(C_FLAG, carry);
-                self.set_flag(V_FLAG, overflow);
+                self.set_arithmetic_flags(result, carry, overflow);
             } else {
-                self.set_flag(C_FLAG, shifter_carry);
+                self.set_nz_and_carry(result, shifter_carry);
             }
         }
         Ok(())
@@ -1369,6 +1535,40 @@ fn arm_wait_cycles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_class_first_decoder_agrees_with_the_straight_line_one() {
+        // Every combination of the bits the encodings are told apart by...
+        for condition in [0x0u32, 0xE, 0xF] {
+            for middle in 0..=0xFFFu32 {
+                for low in 0..=0xFFu32 {
+                    let instruction = condition << 28
+                        | middle << 16
+                        | (low << 4 & 0xF0)
+                        | low >> 4 << 8
+                        | low & 0xF;
+                    assert_eq!(
+                        decode(instruction),
+                        decode_reference(instruction),
+                        "{instruction:#010X}"
+                    );
+                }
+            }
+        }
+        // ...and a long run of arbitrary words.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for _ in 0..2_000_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let instruction = (state >> 16) as u32;
+            assert_eq!(
+                decode(instruction),
+                decode_reference(instruction),
+                "{instruction:#010X}"
+            );
+        }
+    }
 
     #[test]
     fn decodes_immediate_data_processing_and_rotation() {

@@ -11,7 +11,12 @@ mod idle;
 mod state;
 use idle::IdleLoopDetector;
 
+/// Size of the hook filter, in bits (a power of two).
+const HOOK_FILTER_BITS: usize = 1 << 15;
+
 const THUMB_STATE: u32 = 1 << 5;
+/// CPSR bit that masks IRQs.
+const IRQ_DISABLED: u32 = 1 << 7;
 /// `cheat_hook` when the cheats are not tied to a ROM address; the program
 /// counter is never this value.
 const NO_HOOK: u32 = u32::MAX;
@@ -80,6 +85,9 @@ pub struct Emulator {
     tm_use_b: Option<u32>,
     /// Which of those cheats are on.
     make_shiny: bool,
+    /// One bit per halfword of address (folded) that may carry a hook; the
+    /// per-instruction test for "is this a hooked address".
+    hook_filter: Box<[u64; HOOK_FILTER_BITS / 64]>,
     /// With `make_shiny`: one Pokémon in this many is made shiny.
     shiny_one_in: u32,
     perfect_wild: bool,
@@ -123,7 +131,7 @@ impl Emulator {
             tm_use_b,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
-        Ok(Self {
+        let mut emulator = Self {
             cpu: Cpu::default(),
             memory,
             ppu: Ppu::default(),
@@ -148,6 +156,7 @@ impl Emulator {
             tm_use_a,
             tm_use_b,
             make_shiny: false,
+            hook_filter: Box::new([0; HOOK_FILTER_BITS / 64]),
             shiny_one_in: 1,
             perfect_wild: false,
             perfect_opponents: false,
@@ -157,7 +166,9 @@ impl Emulator {
             wild_species_hook: NO_HOOK,
             wild_species: NO_VALUE,
             wild_level: NO_VALUE,
-        })
+        };
+        emulator.refresh_hook_filter();
+        Ok(emulator)
     }
 
     /// Restarts the game as if the console had been power-cycled: CPU, RAM,
@@ -187,30 +198,135 @@ impl Emulator {
     }
 
     pub fn step(&mut self) -> io::Result<u32> {
+        // A halted CPU and the BIOS hooks (SWI vector, IRQ return stub, in
+        // the first 0x200 bytes) are the rare cases, kept out of line.
+        if (self.cpu.halted || self.cpu.registers[15] < 0x200)
+            && let Some(cycles) = self.step_halted_or_bios()?
+        {
+            return Ok(cycles);
+        }
+
+        let pc_before = self.cpu.registers[15];
+        // Hooks are ROM addresses; one bit test says whether this instruction
+        // might be one, which it almost never is.
+        if self.hook_filter[Self::hook_slot(pc_before) >> 6] >> (Self::hook_slot(pc_before) & 63)
+            & 1
+            != 0
+        {
+            self.run_hooks(pc_before);
+        }
+        let cycles = if self.cpu.cpsr & THUMB_STATE != 0 {
+            self.step_thumb()
+        } else {
+            self.cpu.step_arm(&mut self.memory)
+        }?;
+        self.advance_bus(cycles);
+        // After most instructions there is nothing more to do.
+        if self.memory.dma_stall_pending()
+            || (self.cpu.cpsr & IRQ_DISABLED == 0 && self.memory.irq_pending())
+            || (self.skip_idle_loops && self.cpu.registers[15] <= pc_before)
+        {
+            return Ok(cycles + self.after_instruction(pc_before)?);
+        }
+        Ok(cycles)
+    }
+
+    /// The part of [`Self::step`] for a halted CPU and for the BIOS hooks:
+    /// `Some(cycles)` if the step is complete, `None` to go on and execute an
+    /// instruction.
+    #[inline(never)]
+    fn step_halted_or_bios(&mut self) -> io::Result<Option<u32>> {
         if self.cpu.halted {
             self.idle.reset();
             if !self.cpu.should_wake(&self.memory) {
                 self.cpu.cycles += u64::from(HALT_STEP_CYCLES);
                 self.advance_bus(HALT_STEP_CYCLES);
-                return Ok(HALT_STEP_CYCLES);
+                return Ok(Some(HALT_STEP_CYCLES));
             }
             self.cpu.halted = false;
             if self.memory.irq_pending() && self.cpu.request_irq(&mut self.memory)? {
                 self.advance_bus(3);
-                return Ok(3);
+                return Ok(Some(3));
             }
         }
-
-        // The BIOS hooks (SWI vector, IRQ return stub) live in the first
-        // 0x200 bytes; skip the call everywhere else.
         if self.cpu.registers[15] < 0x200
             && let Some(cycles) = self.cpu.step_bios_hle(&mut self.memory)?
         {
             self.idle.reset();
-            return Ok(cycles);
+            return Ok(Some(cycles));
         }
+        Ok(None)
+    }
 
-        let pc_before = self.cpu.registers[15];
+    /// What follows an instruction when a DMA transfer stalled it, an
+    /// interrupt is due or it ended a loop iteration; returns the cycles that
+    /// add to the instruction's.
+    #[inline(never)]
+    fn after_instruction(&mut self, pc_before: u32) -> io::Result<u32> {
+        let mut cycles = 0;
+        // DMA stalls the CPU for as long as it owns the bus. Charging a stall
+        // advances time, which can trigger further transfers (a refill that
+        // crosses a scanline, say), so drain until none is left; otherwise
+        // the follow-on stall would be billed to the next instruction.
+        while self.memory.dma_stall_pending() {
+            let dma_cycles = self.memory.take_dma_cycles();
+            self.cpu.cycles += u64::from(dma_cycles);
+            self.advance_bus(dma_cycles);
+            cycles += dma_cycles;
+        }
+        if self.memory.irq_pending() && self.cpu.request_irq(&mut self.memory)? {
+            self.advance_bus(3);
+            cycles += 3;
+        }
+        // Looked at last, once this step's DMA stall and interrupt entry have
+        // been charged, so loop timestamps measure only the loop itself.
+        if self.skip_idle_loops && self.cpu.registers[15] <= pc_before {
+            cycles += self.skip_idle_iterations();
+        }
+        Ok(cycles)
+    }
+
+    /// Where `pc` falls in the hook filter: a bit per halfword of address,
+    /// folded to [`HOOK_FILTER_BITS`].
+    #[inline(always)]
+    fn hook_slot(pc: u32) -> usize {
+        (pc >> 1) as usize & (HOOK_FILTER_BITS - 1)
+    }
+
+    /// Marks `address` as one that [`Self::run_hooks`] must look at.
+    fn watch(&mut self, address: u32) {
+        if address != NO_HOOK {
+            let slot = Self::hook_slot(address);
+            self.hook_filter[slot >> 6] |= 1 << (slot & 63);
+        }
+    }
+
+    /// Rebuilds the filter from the hook addresses that are in use. Called
+    /// whenever they change.
+    fn refresh_hook_filter(&mut self) {
+        self.hook_filter.fill(0);
+        let fixed = [
+            self.cheat_hook,
+            self.catch_hook,
+            self.wild_scope_hook,
+            self.money_hook,
+            self.exp_hook,
+            self.build_hook,
+            self.encounter_hook,
+            self.wild_species_hook,
+            self.tm_use_a.unwrap_or(NO_HOOK),
+            self.tm_use_b.unwrap_or(NO_HOOK),
+        ];
+        for address in fixed {
+            self.watch(address);
+        }
+    }
+
+    /// The cheats hooked to ROM addresses, run when the CPU is about to
+    /// execute one of them (`pc_before`; the filter may also let through
+    /// other addresses that share its bit).
+    #[inline(never)]
+    fn run_hooks(&mut self, pc_before: u32) {
         // Cheats hooked to a ROM address run when execution reaches it, as
         // the cartridge's code handler would.
         if pc_before == self.cheat_hook {
@@ -224,6 +340,7 @@ impl Emulator {
         // Perfect stats for wild Pokémon: know while `CreateWildMon` runs.
         if pc_before == self.wild_scope_hook {
             self.wild_return = self.cpu.registers[14] & !1;
+            self.watch(self.wild_return);
         } else if pc_before == self.wild_return {
             self.wild_return = NO_HOOK;
         }
@@ -261,35 +378,6 @@ impl Emulator {
                 self.cpu.registers[1] = self.wild_level;
             }
         }
-        let mut cycles = if self.cpu.cpsr & THUMB_STATE != 0 {
-            self.step_thumb()
-        } else {
-            self.cpu.step_arm(&mut self.memory)
-        }?;
-        self.advance_bus(cycles);
-        // DMA stalls the CPU for as long as it owns the bus. Charging a stall
-        // advances time, which can trigger further transfers (a refill that
-        // crosses a scanline, say), so drain until none is left; otherwise
-        // the follow-on stall would be billed to the next instruction.
-        loop {
-            let dma_cycles = self.memory.take_dma_cycles();
-            if dma_cycles == 0 {
-                break;
-            }
-            self.cpu.cycles += u64::from(dma_cycles);
-            self.advance_bus(dma_cycles);
-            cycles += dma_cycles;
-        }
-        if self.memory.irq_pending() && self.cpu.request_irq(&mut self.memory)? {
-            self.advance_bus(3);
-            cycles += 3;
-        }
-        // Looked at last, once this step's DMA stall and interrupt entry have
-        // been charged, so loop timestamps measure only the loop itself.
-        if self.skip_idle_loops && self.cpu.registers[15] <= pc_before {
-            cycles += self.skip_idle_iterations();
-        }
-        Ok(cycles)
     }
 
     /// At the hook inside `CreateBoxMon` (see [`shiny`] and
@@ -372,11 +460,16 @@ impl Emulator {
     }
 
     /// Advances the bus and draws every scanline that finished meanwhile.
+    #[inline(always)]
     fn advance_bus(&mut self, cycles: u32) {
         self.memory.advance(cycles);
-        if !self.memory.has_scanlines() {
-            return;
+        if self.memory.has_scanlines() {
+            self.finish_scanlines();
         }
+    }
+
+    #[inline(never)]
+    fn finish_scanlines(&mut self) {
         for snapshot in self.memory.take_scanlines() {
             if self.rendering {
                 self.ppu.render_scanline_with_events(
@@ -529,6 +622,7 @@ impl Emulator {
                 }
             }
         }
+        self.refresh_hook_filter();
     }
 
     /// Installs the cheat menu's options. Today the wild-encounter row and the

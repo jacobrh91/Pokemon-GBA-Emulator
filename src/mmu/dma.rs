@@ -149,8 +149,15 @@ impl MemoryBus {
     }
 
     /// Cycles the CPU was stalled by DMA since the last call.
+    #[inline]
     pub fn take_dma_cycles(&mut self) -> u32 {
         std::mem::take(&mut self.dma_cycles)
+    }
+
+    /// Whether DMA has stalled the CPU since the last [`Self::take_dma_cycles`].
+    #[inline]
+    pub fn dma_stall_pending(&self) -> bool {
+        self.dma_cycles != 0
     }
 
     fn run_dma(&mut self, channel: usize) {

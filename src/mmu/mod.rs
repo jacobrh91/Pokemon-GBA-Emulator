@@ -349,6 +349,7 @@ impl MemoryBus {
     /// Accounts `cycles` of CPU time. The work (display events, timers,
     /// audio) is deferred until something observable is due; register reads
     /// that depend on time compute their value from the pending cycles.
+    #[inline(always)]
     pub fn advance(&mut self, cycles: u32) {
         self.pending_cycles = self.pending_cycles.saturating_add(cycles);
         if self.pending_cycles >= self.cycles_until_event {
@@ -362,6 +363,7 @@ impl MemoryBus {
         self.flush_pending();
     }
 
+    #[inline(never)]
     fn flush_pending(&mut self) {
         let elapsed = std::mem::take(&mut self.pending_cycles);
         if elapsed != 0 {

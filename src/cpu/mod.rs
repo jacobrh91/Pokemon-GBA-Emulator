@@ -103,15 +103,31 @@ impl Cpu {
         }
     }
 
+    /// N and Z from `result`, in one update of the status register.
+    #[inline(always)]
     fn set_nz(&mut self, result: u32) {
-        self.set_flag(N_FLAG, result & 0x8000_0000 != 0);
-        self.set_flag(Z_FLAG, result == 0);
+        self.cpsr = (self.cpsr & !(N_FLAG | Z_FLAG))
+            | (result & N_FLAG)
+            | (u32::from(result == 0) * Z_FLAG);
     }
 
+    /// N and Z from `result`, with C and V given.
+    #[inline(always)]
     fn set_arithmetic_flags(&mut self, result: u32, carry: bool, overflow: bool) {
-        self.set_nz(result);
-        self.set_flag(C_FLAG, carry);
-        self.set_flag(V_FLAG, overflow);
+        self.cpsr = (self.cpsr & !(N_FLAG | Z_FLAG | C_FLAG | V_FLAG))
+            | (result & N_FLAG)
+            | (u32::from(result == 0) * Z_FLAG)
+            | (u32::from(carry) * C_FLAG)
+            | (u32::from(overflow) * V_FLAG);
+    }
+
+    /// N and Z from `result`, with C given (V is left alone).
+    #[inline(always)]
+    fn set_nz_and_carry(&mut self, result: u32, carry: bool) {
+        self.cpsr = (self.cpsr & !(N_FLAG | Z_FLAG | C_FLAG))
+            | (result & N_FLAG)
+            | (u32::from(result == 0) * Z_FLAG)
+            | (u32::from(carry) * C_FLAG);
     }
 
     pub fn mode(&self) -> u32 {
@@ -321,7 +337,11 @@ impl Cpu {
         Ok(true)
     }
 
+    #[inline]
     fn condition_passed(&self, condition: u8) -> bool {
+        if condition == 0xE {
+            return true;
+        }
         let n = self.cpsr & N_FLAG != 0;
         let z = self.cpsr & Z_FLAG != 0;
         let c = self.cpsr & C_FLAG != 0;
@@ -419,28 +439,26 @@ fn add_data_wait_cycles(
     accesses: &DataAccesses,
 ) -> io::Result<u32> {
     // Wait states are the cost beyond the single cycle the base count includes.
-    let extra = |address: u32, width: u8, sequential: bool| -> io::Result<u32> {
-        Ok(bus
-            .transfer_cycles(address, width, sequential)?
-            .saturating_sub(1))
+    let extra = |address: u32, width: u8, sequential: bool| -> u32 {
+        bus.access_cycles(address, width, sequential)
+            .saturating_sub(1)
     };
     let total = match *accesses {
         DataAccesses::None => 0,
-        DataAccesses::One(address, width) => extra(address, width, false)?,
+        DataAccesses::One(address, width) => extra(address, width, false),
         DataAccesses::Two(first, second) => {
-            extra(first.0, first.1, false)? + extra(second.0, second.1, true)?
+            extra(first.0, first.1, false) + extra(second.0, second.1, true)
         }
         DataAccesses::Words { start, count } => {
             let mut total = 0;
             for index in 0..count {
-                total += extra(start.wrapping_add(index * 4), 4, index != 0)?;
+                total += extra(start.wrapping_add(index * 4), 4, index != 0);
             }
             total
         }
     };
-    wait_cycles
-        .checked_add(total)
-        .ok_or_else(|| io::Error::other("bus wait-state cycle count overflow"))
+    // At most 16 words of a few cycles each.
+    Ok(wait_cycles.saturating_add(total))
 }
 
 fn valid_mode(mode: u32) -> bool {

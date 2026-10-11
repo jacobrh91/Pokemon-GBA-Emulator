@@ -264,6 +264,7 @@ impl Cpu {
     /// The PC register points to the instruction being fetched. Sequential
     /// instructions advance it by two bytes. Cycles count base instruction
     /// cycles, including estimated memory wait states.
+    #[inline(never)]
     pub fn step_thumb(&mut self, bus: &mut MemoryBus) -> io::Result<u32> {
         let pc = self.registers[15];
         if pc & 1 != 0 {
@@ -290,9 +291,7 @@ impl Cpu {
         };
         bus.set_open_bus(u32::from(opcode) | u32::from(opcode) << 16);
         let fetch_sequential = self.sequential_fetch == Some((pc, true));
-        let fetch_wait_cycles = bus
-            .transfer_cycles(pc, 2, fetch_sequential)?
-            .saturating_sub(1);
+        let fetch_wait_cycles = bus.fetch_wait_cycles_16(pc, fetch_sequential);
         let op = thumb::decode(opcode);
         if matches!(op, ThumbOp::Unknown(_)) {
             return self.take_exception(
@@ -314,36 +313,15 @@ impl Cpu {
 
         let instruction_status = self.cpsr;
         if let Err(error) = self.execute_thumb(op, pc, bus) {
-            let (mode, vector, return_address, cycles) = if is_memory_fault(&error) {
-                (
-                    MODE_ABORT,
-                    VECTOR_DATA_ABORT,
-                    pc.wrapping_add(8),
-                    exception_entry_cycles(4, fetch_wait_cycles)?,
-                )
-            } else if matches!(
-                error.kind(),
-                io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
-            ) {
-                (
-                    MODE_UNDEFINED,
-                    VECTOR_UNDEFINED,
-                    pc.wrapping_add(2),
-                    exception_entry_cycles(3, fetch_wait_cycles)?,
-                )
-            } else {
-                return Err(error);
-            };
-            return self.take_exception(mode, vector, return_address, instruction_status, cycles);
+            return self.thumb_fault(error, pc, fetch_wait_cycles, instruction_status);
         }
+
+        // Bounded: a few cycles of base, a fetch and a transfer's worth of
+        // waits; the counter was checked for headroom before executing.
         let instruction_cycles = base_cycles
-            .checked_add(fetch_wait_cycles)
-            .and_then(|cycles| cycles.checked_add(self.data_wait))
-            .ok_or_else(|| io::Error::other("instruction cycle count overflow"))?;
-        self.cycles = self
-            .cycles
-            .checked_add(u64::from(instruction_cycles))
-            .ok_or_else(|| io::Error::other("CPU cycle counter overflow"))?;
+            .saturating_add(fetch_wait_cycles)
+            .saturating_add(self.data_wait);
+        self.cycles += u64::from(instruction_cycles);
         if !branched {
             self.registers[15] = pc.wrapping_add(2);
         }
@@ -354,6 +332,41 @@ impl Cpu {
         };
 
         Ok(instruction_cycles)
+    }
+
+    /// What an instruction that failed turns into: a data abort for a bad
+    /// address, an undefined-instruction trap for an unsupported encoding,
+    /// anything else is an error of the emulator.
+    #[cold]
+    #[inline(never)]
+    fn thumb_fault(
+        &mut self,
+        error: io::Error,
+        pc: u32,
+        fetch_wait_cycles: u32,
+        instruction_status: u32,
+    ) -> io::Result<u32> {
+        let (mode, vector, return_address, cycles) = if is_memory_fault(&error) {
+            (
+                MODE_ABORT,
+                VECTOR_DATA_ABORT,
+                pc.wrapping_add(8),
+                exception_entry_cycles(4, fetch_wait_cycles)?,
+            )
+        } else if matches!(
+            error.kind(),
+            io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput
+        ) {
+            (
+                MODE_UNDEFINED,
+                VECTOR_UNDEFINED,
+                pc.wrapping_add(2),
+                exception_entry_cycles(3, fetch_wait_cycles)?,
+            )
+        } else {
+            return Err(error);
+        };
+        self.take_exception(mode, vector, return_address, instruction_status, cycles)
     }
 
     /// `(base cycles, ends in a branch)` for `op`, from the pre-execution
@@ -435,11 +448,9 @@ impl Cpu {
     /// cycle already counted in the instruction's base cycles).
     #[inline]
     fn charge_data_access(&mut self, bus: &MemoryBus, address: u32, width: u8, sequential: bool) {
-        let cycles = bus
-            .transfer_cycles(address, width, sequential)
-            .unwrap_or(1)
+        self.data_wait += bus
+            .access_cycles(address, width, sequential)
             .saturating_sub(1);
-        self.data_wait += cycles;
     }
 
     fn execute_thumb_arithmetic(&mut self, rd: u8, lhs: u32, rhs: u32, subtract: bool) {
@@ -477,8 +488,7 @@ impl Cpu {
                     self.cpsr & C_FLAG != 0,
                 );
                 self.registers[rd as usize] = result;
-                self.set_nz(result);
-                self.set_flag(C_FLAG, carry);
+                self.set_nz_and_carry(result, carry);
             }
             ThumbOp::AddSubtract {
                 rd,
@@ -497,69 +507,58 @@ impl Cpu {
             ThumbOp::Alu { opcode, rd, rs } => {
                 let lhs = self.registers[rd as usize];
                 let rhs = self.registers[rs as usize];
-                let result = match opcode {
-                    0x0 => Some(lhs & rhs),
-                    0x1 => Some(lhs ^ rhs),
+                let carry_in = self.cpsr & C_FLAG != 0;
+                // The result, whether it is stored (TST, CMP and CMN only set
+                // flags), and the C and V the operation produces (`None`
+                // leaves the flag as it is).
+                let (result, store, carry, overflow) = match opcode {
+                    0x0 => (lhs & rhs, true, None, None),
+                    0x1 => (lhs ^ rhs, true, None, None),
                     0x2 | 0x3 | 0x4 | 0x7 => {
                         let shift_type = match opcode {
                             0x2 => 0,
                             0x3 => 1,
                             0x4 => 2,
-                            0x7 => 3,
-                            _ => unreachable!(),
+                            _ => 3,
                         };
-                        let (value, carry) = shift_operand(
-                            lhs,
-                            shift_type,
-                            rhs & 0xFF,
-                            true,
-                            self.cpsr & C_FLAG != 0,
-                        );
-                        self.set_flag(C_FLAG, carry);
-                        Some(value)
+                        let (value, carry) =
+                            shift_operand(lhs, shift_type, rhs & 0xFF, true, carry_in);
+                        (value, true, Some(carry), None)
                     }
                     0x5 => {
-                        let (value, carry, overflow) =
-                            add_with_carry(lhs, rhs, self.cpsr & C_FLAG != 0);
-                        self.set_flag(C_FLAG, carry);
-                        self.set_flag(V_FLAG, overflow);
-                        Some(value)
+                        let (value, carry, overflow) = add_with_carry(lhs, rhs, carry_in);
+                        (value, true, Some(carry), Some(overflow))
                     }
                     0x6 => {
-                        let (value, carry, overflow) =
-                            subtract_with_borrow(lhs, rhs, self.cpsr & C_FLAG == 0);
-                        self.set_flag(C_FLAG, carry);
-                        self.set_flag(V_FLAG, overflow);
-                        Some(value)
+                        let (value, carry, overflow) = subtract_with_borrow(lhs, rhs, !carry_in);
+                        (value, true, Some(carry), Some(overflow))
                     }
+                    0x8 => (lhs & rhs, false, None, None),
                     0x9 => {
                         let (result, carry, overflow) = subtract_with_borrow(0, rhs, false);
-                        self.set_arithmetic_flags(result, carry, overflow);
-                        Some(result)
+                        (result, true, Some(carry), Some(overflow))
                     }
                     0xA => {
                         let (result, carry, overflow) = subtract_with_borrow(lhs, rhs, false);
-                        self.set_arithmetic_flags(result, carry, overflow);
-                        Some(result)
+                        (result, false, Some(carry), Some(overflow))
                     }
                     0xB => {
                         let (result, carry, overflow) = add_with_carry(lhs, rhs, false);
-                        self.set_arithmetic_flags(result, carry, overflow);
-                        Some(result)
+                        (result, false, Some(carry), Some(overflow))
                     }
-                    0xC => Some(lhs | rhs),
-                    0xD => Some(lhs.wrapping_mul(rhs)),
-                    0xE => Some(lhs & !rhs),
-                    0xF => Some(!rhs),
-                    0x8 => Some(lhs & rhs),
-                    _ => None,
+                    0xC => (lhs | rhs, true, None, None),
+                    0xD => (lhs.wrapping_mul(rhs), true, None, None),
+                    0xE => (lhs & !rhs, true, None, None),
+                    _ => (!rhs, true, None, None),
                 };
-                if let Some(result) = result {
-                    if opcode != 0x8 && opcode != 0xA && opcode != 0xB {
-                        self.registers[rd as usize] = result;
-                    }
-                    self.set_nz(result);
+                if store {
+                    self.registers[rd as usize] = result;
                 }
+                self.set_arithmetic_flags(
+                    result,
+                    carry.unwrap_or(carry_in),
+                    overflow.unwrap_or(self.cpsr & V_FLAG != 0),
+                );
             }
             ThumbOp::HighRegister { operation, rd, rs } => {
                 let lhs = if rd == 15 {
@@ -643,8 +642,7 @@ impl Cpu {
                 self.registers[rd as usize] = val;
 
                 // Update N and Z flags based on the moved value
-                self.set_flag(N_FLAG, (val & (1 << 31)) != 0);
-                self.set_flag(Z_FLAG, val == 0);
+                self.set_nz(val);
                 // Move Immediate leaves C and V flags untouched
             }
 
@@ -658,10 +656,8 @@ impl Cpu {
                 // Overflow (V) check for subtraction: signs of inputs differ, and sign of result differs from val1
                 let overflow = ((val1 ^ val2) & (val1 ^ res) & 0x8000_0000) != 0;
 
-                self.set_flag(N_FLAG, (res & 0x8000_0000) != 0);
-                self.set_flag(Z_FLAG, res == 0);
-                self.set_flag(C_FLAG, !carry); // ARM uses inverted borrow for Carry out of subtraction
-                self.set_flag(V_FLAG, overflow);
+                // ARM uses inverted borrow for Carry out of subtraction.
+                self.set_arithmetic_flags(res, !carry, overflow);
             }
 
             ThumbOp::AddImmediate { rd, imm } => {
@@ -672,10 +668,7 @@ impl Cpu {
                 let overflow = (!(val1 ^ val2) & (val1 ^ res) & 0x8000_0000) != 0;
 
                 self.registers[rd as usize] = res;
-                self.set_flag(N_FLAG, (res & 0x8000_0000) != 0);
-                self.set_flag(Z_FLAG, res == 0);
-                self.set_flag(C_FLAG, carry);
-                self.set_flag(V_FLAG, overflow);
+                self.set_arithmetic_flags(res, carry, overflow);
             }
 
             ThumbOp::SubtractImmediate { rd, imm } => {
@@ -686,10 +679,7 @@ impl Cpu {
                 let overflow = ((val1 ^ val2) & (val1 ^ res) & 0x8000_0000) != 0;
 
                 self.registers[rd as usize] = res;
-                self.set_flag(N_FLAG, (res & 0x8000_0000) != 0);
-                self.set_flag(Z_FLAG, res == 0);
-                self.set_flag(C_FLAG, !carry);
-                self.set_flag(V_FLAG, overflow);
+                self.set_arithmetic_flags(res, !carry, overflow);
             }
 
             ThumbOp::BranchUnconditional { offset } => {
