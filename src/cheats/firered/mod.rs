@@ -4,7 +4,7 @@
 //! instruction bytes (a *signature scan*) and the emulator changes a register
 //! when the CPU reaches that address.
 //!
-//! Three mechanisms are kept apart:
+//! The mechanisms are kept apart:
 //!
 //! * [`wild_species`]: replaces the arguments of a function *at its entry*
 //!   (the species and level of every wild encounter).
@@ -12,6 +12,8 @@
 //!   catch odds, just before the game tests them).
 //! * [`shiny`]: replaces a value *in the middle of a routine* of the code that
 //!   builds every Pokémon (its personality value, so that it is shiny).
+//! * [`money`]: replaces the value returned by the function that reads the
+//!   balance, so that the game sees 999,999.
 //! * [`perfect_stats`]: the same place, to set the IVs (a local that the
 //!   routine tests a little later).
 //!
@@ -72,6 +74,7 @@
 //! its own signature.
 
 pub mod catch_rate;
+pub mod money;
 pub mod perfect_stats;
 pub mod shiny;
 pub mod wild_species;

@@ -18,8 +18,8 @@ use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use gba_emulator::settings::Settings;
 use input::{
-    CHEAT_MENU_KEY, EscapeAction, LOAD_STATE_KEY, SAVE_STATE_KEY, buttons_from_keys, escape_action,
-    fast_forward_held,
+    CHEAT_MENU_BACK_KEY, CHEAT_MENU_KEY, EscapeAction, LOAD_STATE_KEY, SAVE_STATE_KEY,
+    buttons_from_keys, escape_action, fast_forward_held,
 };
 use minifb::{Key, MouseMode, Scale, ScaleMode, Window, WindowOptions};
 use settings_sync::SettingsSync;
@@ -207,6 +207,9 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         if window.is_key_pressed(CHEAT_MENU_KEY, minifb::KeyRepeat::No) {
             dock.toggle_menu();
+        }
+        if window.is_key_pressed(CHEAT_MENU_BACK_KEY, minifb::KeyRepeat::No) && dock.menu_open() {
+            dock.close_menu();
         }
         if window.is_key_pressed(SAVE_STATE_KEY, minifb::KeyRepeat::No) {
             shared.state_request.store(STATE_SAVE, Ordering::Relaxed);

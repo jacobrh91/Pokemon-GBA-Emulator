@@ -24,6 +24,9 @@ pub(super) const LOAD_STATE_KEY: Key = Key::Key1;
 
 /// Tab opens and closes the cheat menu (the same as its dock button).
 pub(super) const CHEAT_MENU_KEY: Key = Key::Tab;
+/// The key of the console's B button also closes an open cheat menu, as B
+/// backs out of menus in the games. The press still reaches the game.
+pub(super) const CHEAT_MENU_BACK_KEY: Key = Key::C;
 
 /// What a press of Escape should do.
 #[derive(Debug, PartialEq, Eq)]

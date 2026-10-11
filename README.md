@@ -51,7 +51,7 @@ second and at exit.
 Press **Tab**, or click the **CHEATS** button at the right end of the dock, to
 open a menu of cheats above the dock. Every row has its own **checkbox at the
 left** that switches that cheat on and off; there is no global switch. The menu
-closes with Tab, the button, Escape, or a click anywhere else, and the choices
+closes with Tab, the button, Escape, C (the B button), or a click anywhere else, and the choices
 apply immediately and are remembered in the settings file for the next time the
 game is played.
 
@@ -60,7 +60,7 @@ game is played.
 | *n* codes from the cheats file (only when the file has codes) | | **active**; never remembered, so it starts off every session |
 | Wild Pokémon is *species* at level *n* | dropdown: ANY, then the 251 species; `-` / `+`, mouse wheel, `X` to clear for the level (empty keeps the game's) | **active** (FireRed) |
 | Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | **active** (FireRed) |
-| Infinite money | | not active yet (tagged SOON) |
+| Infinite money | | **active** (FireRed) |
 | 100% catch rate | | **active** (FireRed) |
 | All experience is boosted | | not active yet (tagged SOON); the size of the boost is not decided |
 | All Pokémon are shiny | | **active** (FireRed) |
@@ -128,6 +128,30 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 ("Gotcha! MEWTWO was caught!") with it on, on v1.0, v1.1 and the Japanese build.
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
+
+### Infinite money (Pokémon FireRed)
+
+Every reader of the balance goes through one small function, `GetMoney`, which
+decrypts the stored balance with the save's key. With the row on, the emulator
+sets its return value to 999,999 at the end of the function. The game then
+sees a balance of ¥999,999 everywhere: the money box shows it, the affordability
+check says yes, and the shop's quantity prompt works out the most you can buy
+from it, so it is capped by the game's own limit of 99 rather than your wallet
+(at ×1, pressing Down wraps to ×99). Payments are written back like any
+balance, so the real balance becomes 999,999 minus what was spent; it is hidden
+while the cheat is on, and is what is left when it is switched off. The
+function is found from `IsEnoughMoney`, whose bytes are unique and which
+begins by calling it (`src/cheats/firered/money.rs`).
+
+A shop that is already open keeps the number it drew until the game redraws the
+money box (after a purchase, or on leaving and re-entering), so switch the row
+on before entering a shop.
+
+Checked on v1.1 from the save state at a Poké Mart counter with ¥32: the
+quantity prompt starts at ×01 ¥200, Down goes to ×99 ¥19800, the purchase
+completes ("Here you are! Thank you!") and the money box then shows ¥999999.
+The other builds have the same bytes (the signatures match once in each) but
+were not run in the game.
 
 ### Perfect stats (Pokémon FireRed)
 
@@ -268,7 +292,7 @@ misread.
 |---|---|
 | W A S D | D-pad |
 | Space | A |
-| C | B |
+| C | B (also closes the cheat menu) |
 | Q / E | L / R |
 | X | Start |
 | V | Select |
@@ -312,6 +336,7 @@ src/
     firered/         Built-in FireRed cheats found by signature scan:
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
+      money.rs         infinite money (the balance GetMoney returns)
       perfect_stats.rs perfect IVs (the fixed-IV local of the same routine)
       shiny.rs         all Pokémon shiny (the PID, inside the routine that builds a Pokémon)
     options.rs       The cheat menu's options

@@ -1,5 +1,5 @@
 use crate::cheats::Cheats;
-use crate::cheats::firered::{perfect_stats, shiny};
+use crate::cheats::firered::{money, perfect_stats, shiny};
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -55,6 +55,12 @@ pub struct Emulator {
     /// Where the cheats that change a Pokémon as it is built (all shiny,
     /// perfect stats) are applied while one is on, or `NO_HOOK`.
     build_hook: u32,
+    /// The `bx lr` at the end of `GetMoney`, found by a signature scan (see
+    /// [`money`]); `None` if not recognised.
+    money_balance: Option<u32>,
+    /// Where the infinite-money cheat is applied while it is on, or
+    /// `NO_HOOK`.
+    money_hook: u32,
     /// Which of those cheats are on.
     make_shiny: bool,
     perfect_wild: bool,
@@ -91,6 +97,7 @@ impl Emulator {
             create_wild_mon,
             catch_check,
             shiny_point,
+            money_balance,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         Ok(Self {
@@ -109,6 +116,8 @@ impl Emulator {
             catch_hook: NO_HOOK,
             shiny_point,
             build_hook: NO_HOOK,
+            money_balance,
+            money_hook: NO_HOOK,
             make_shiny: false,
             perfect_wild: false,
             perfect_opponents: false,
@@ -187,6 +196,11 @@ impl Emulator {
             self.wild_return = self.cpu.registers[14] & !1;
         } else if pc_before == self.wild_return {
             self.wild_return = NO_HOOK;
+        }
+        // Infinite money: at the end of `GetMoney`, the balance returned is
+        // the largest the game allows.
+        if pc_before == self.money_hook {
+            self.cpu.registers[0] = money::SHOWN_BALANCE;
         }
         // All Pokémon shiny, perfect stats: while a Pokémon is being built.
         if pc_before == self.build_hook {
@@ -421,6 +435,11 @@ impl Emulator {
             Some(address) if self.cheat_options.catch_always => address,
             _ => NO_HOOK,
         };
+        // The infinite-money row: hook the end of the balance reader.
+        self.money_hook = match self.money_balance {
+            Some(address) if self.cheat_options.infinite_money => address,
+            _ => NO_HOOK,
+        };
         // The all-shiny and perfect-stats rows: hook where a Pokémon is being
         // built. The perfect-stats row for wild Pokémon also watches
         // `CreateWildMon`, to tell wild ones from the rest.
@@ -473,6 +492,7 @@ impl Emulator {
             create_wild_mon: self.create_wild_mon,
             catch_check: self.catch_check,
             shiny_point: self.shiny_point,
+            money_balance: self.money_balance,
         }
     }
 
