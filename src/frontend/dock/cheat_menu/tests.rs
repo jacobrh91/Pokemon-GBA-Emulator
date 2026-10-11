@@ -1,6 +1,6 @@
 use super::*;
 use crate::frontend::draw::Canvas;
-use gba_emulator::cheat_options::CheatOptions;
+use gba_emulator::cheats::options::CheatOptions;
 
 const WIDTH: usize = 960;
 const HEIGHT: usize = 640;
@@ -648,19 +648,54 @@ fn drawing_every_state_stays_inside_the_window() {
 
 #[test]
 fn only_options_that_are_not_live_are_tagged_soon() {
-    // SOON is painted for exactly the options `is_live` says do nothing yet.
+    use gba_emulator::cheats::options::CheatOption;
+    // The menu's checkbox rows, as options. (Wild species and level share the
+    // first row, which never carries a tag.)
+    let rows = [
+        CheatOption::PerfectStats,
+        CheatOption::InfiniteMoney,
+        CheatOption::CatchAlways,
+        CheatOption::ExpBoost,
+        CheatOption::Shiny,
+    ];
+    let expected_tags = rows
+        .iter()
+        .filter(|option| !CheatOptions::is_live(**option))
+        .count();
+    assert_eq!(expected_tags, 4, "the catch rate row is live and untagged");
+
+    // One tag is exactly the pixels of the text "SOON".
+    let mut single = vec![0u32; 200 * 40];
+    Canvas::new(&mut single, 200, 40, 0).text("SOON", 4, 4, 0x008A_9299);
+    let pixels_per_tag = single.iter().filter(|p| **p == 0x008A_9299).count();
+    assert!(pixels_per_tag > 20);
+
     let layout = layout();
     let menu = open_menu();
-    let mut with_tags = vec![0u32; WIDTH * HEIGHT];
-    menu.draw(&mut Canvas::new(&mut with_tags, WIDTH, HEIGHT, 0), &layout);
-    let soon_colour = 0x008A_9299u32;
-    let count = with_tags.iter().filter(|p| **p == soon_colour).count();
-    assert!(count > 0, "SOON tags are drawn");
-    // Five rows carry a tag: perfect stats, money, catch rate, experience
-    // and shiny.
-    let tag_pixels_per_tag = count / 5;
-    assert!(tag_pixels_per_tag > 20);
-    assert_eq!(count % 5, 0, "every tag is drawn the same");
+    let mut drawn = vec![0u32; WIDTH * HEIGHT];
+    menu.draw(&mut Canvas::new(&mut drawn, WIDTH, HEIGHT, 0), &layout);
+    let count = drawn.iter().filter(|p| **p == 0x008A_9299).count();
+    assert_eq!(count, expected_tags * pixels_per_tag);
+}
+
+#[test]
+fn the_catch_rate_row_is_untagged_and_the_still_inactive_rows_are_tagged() {
+    // Look at the band of pixels at the right edge of each row for the SOON
+    // colour.
+    let layout = layout();
+    let menu = open_menu();
+    let mut drawn = vec![0u32; WIDTH * HEIGHT];
+    menu.draw(&mut Canvas::new(&mut drawn, WIDTH, HEIGHT, 0), &layout);
+    let right = (layout.panel.x + layout.panel.width - 24 - 60) as usize;
+    let tagged = |rect: Rect| {
+        (rect.y..rect.y + rect.height)
+            .any(|y| (right..right + 60).any(|x| drawn[y as usize * WIDTH + x] == 0x008A_9299))
+    };
+    assert!(tagged(layout.perfect_dropdown));
+    assert!(tagged(layout.money));
+    assert!(!tagged(layout.catch), "100% catch rate works now");
+    assert!(tagged(layout.exp_boost));
+    assert!(tagged(layout.shiny));
 }
 
 #[test]

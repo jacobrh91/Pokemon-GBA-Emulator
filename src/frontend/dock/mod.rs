@@ -11,7 +11,7 @@ mod layout;
 mod speed;
 
 use cheat_menu::{CheatMenu, MenuLayout};
-use gba_emulator::cheat_options::CheatOptions;
+use gba_emulator::cheats::options::CheatOptions;
 use layout::{KNOB_RADIUS, Layout};
 pub use speed::SpeedSetting;
 

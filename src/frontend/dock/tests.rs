@@ -503,7 +503,7 @@ fn menu_choices_are_reported_once_and_do_not_press_dock_buttons() {
 #[test]
 fn restored_options_are_not_reported_as_a_change() {
     let mut dock = Dock::new(0.5);
-    let options = gba_emulator::cheat_options::CheatOptions {
+    let options = gba_emulator::cheats::options::CheatOptions {
         wild_species: Some(147),
         wild_level: Some(20),
         ..Default::default()

@@ -1,5 +1,6 @@
-use crate::cheat_options::CheatOptions;
 use crate::cheats::Cheats;
+use crate::cheats::firered::{catch_rate, wild_species};
+use crate::cheats::options::CheatOptions;
 use crate::cpu::Cpu;
 use crate::mmu::{MemoryBus, ROM_START};
 use crate::ppu::{Ppu, SCREEN_HEIGHT};
@@ -7,7 +8,6 @@ use std::io;
 
 mod idle;
 mod state;
-mod wild_species;
 use idle::IdleLoopDetector;
 
 const THUMB_STATE: u32 = 1 << 5;
@@ -16,6 +16,9 @@ const THUMB_STATE: u32 = 1 << 5;
 const NO_HOOK: u32 = u32::MAX;
 /// A register value that is never written: "leave this argument alone".
 const NO_VALUE: u32 = u32::MAX;
+/// A value of the catch calculation's `odds` that always passes the game's
+/// `odds > 254` test.
+const CATCH_ALWAYS_ODDS: u32 = 0xFF;
 
 /// Granularity at which a halted CPU lets the rest of the system advance.
 const HALT_STEP_CYCLES: u32 = 32;
@@ -34,10 +37,16 @@ pub struct Emulator {
     /// `NO_HOOK`.
     cheat_hook: u32,
     /// Bus address of the game's `CreateWildMon`, found once by a signature
-    /// scan of the ROM (see `wild_species.rs`); `None` if not recognised.
+    /// scan of the ROM (see [`wild_species`]); `None` if not recognised.
     create_wild_mon: Option<u32>,
     /// The cheat menu's options.
     cheat_options: CheatOptions,
+    /// Bus address of the catch check's `cmp r6, #0xFE`, found by a signature
+    /// scan (see [`catch_rate`]); `None` if not recognised.
+    catch_check: Option<u32>,
+    /// Where the 100% catch rate cheat is applied while it is on, or
+    /// `NO_HOOK`.
+    catch_hook: u32,
     /// Where the wild-encounter override is applied while it is active, or
     /// `NO_HOOK`, and the species / level written there (`NO_VALUE` to keep
     /// the game's).
@@ -54,7 +63,8 @@ impl Emulator {
     /// before stepping.
     pub fn new(rom_path: &str) -> io::Result<Self> {
         let memory = MemoryBus::new(rom_path)?;
-        let create_wild_mon = wild_species::find_create_wild_mon(&memory.rom);
+        let create_wild_mon = wild_species::find(&memory.rom);
+        let catch_check = catch_rate::find(&memory.rom);
         Ok(Self {
             cpu: Cpu::default(),
             memory,
@@ -67,6 +77,8 @@ impl Emulator {
             cheats: Cheats::default(),
             cheat_hook: NO_HOOK,
             create_wild_mon,
+            catch_check,
+            catch_hook: NO_HOOK,
             cheat_options: CheatOptions::default(),
             wild_species_hook: NO_HOOK,
             wild_species: NO_VALUE,
@@ -129,6 +141,11 @@ impl Emulator {
         // the cartridge's code handler would.
         if pc_before == self.cheat_hook {
             self.cheats.apply(&mut self.memory);
+        }
+        // 100% catch rate: at the `odds > 254` test, make `odds` (r6) big
+        // enough that the ball always catches.
+        if pc_before == self.catch_hook {
+            self.cpu.registers[6] = CATCH_ALWAYS_ODDS;
         }
         // Wild-encounter override: replace the species and/or level
         // arguments of the function that builds every wild encounter.
@@ -307,6 +324,11 @@ impl Emulator {
         } else {
             NO_HOOK
         };
+        // The 100% catch rate row: hook the catch check while it is on.
+        self.catch_hook = match self.catch_check {
+            Some(address) if self.cheat_options.catch_always => address,
+            _ => NO_HOOK,
+        };
         // The wild-encounter override, driven by its row of the menu.
         self.wild_species_hook = NO_HOOK;
         self.wild_species = NO_VALUE;
@@ -345,6 +367,12 @@ impl Emulator {
     /// whose function the signature scan can identify.
     pub fn wild_species_hook_address(&self) -> Option<u32> {
         self.create_wild_mon
+    }
+
+    /// The bus address the 100% catch rate cheat hooks in this ROM, or `None`
+    /// when it is not a FireRed build whose catch check can be found.
+    pub fn catch_check_address(&self) -> Option<u32> {
+        self.catch_check
     }
 
     /// Whether the wild-species override can work with this ROM.

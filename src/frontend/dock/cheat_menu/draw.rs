@@ -3,8 +3,8 @@
 use super::{CheatMenu, LIST_ENTRIES, LIST_ROW_HEIGHT, LIST_VISIBLE_ROWS, MenuLayout};
 use crate::frontend::dock::draw::{DOCK_COLOR, FILL_COLOR, ICON_COLOR, TRACK_COLOR};
 use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
-use gba_emulator::cheat_options::{CheatOption, CheatOptions, PerfectTarget};
-use gba_emulator::species;
+use gba_emulator::cheats::options::{CheatOption, CheatOptions, PerfectTarget};
+use gba_emulator::cheats::species;
 
 /// Colour of the SOON tag on options that do not change the game yet.
 const SOON_COLOR: u32 = 0x008A_9299;

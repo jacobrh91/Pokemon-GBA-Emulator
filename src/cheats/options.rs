@@ -1,6 +1,6 @@
 //! The options of the cheat menu: built-in, game-specific cheats that are
 //! switched on and off while playing, as opposed to the raw codes of a
-//! `.cheats` file (see [`crate::cheats`]).
+//! `.cheats` file (see [`super::codebreaker`]).
 //!
 //! Which options act on the game today is recorded in [`CheatOptions::is_live`];
 //! the rest are stored, shown and persisted so the menu is complete, but do not
@@ -82,7 +82,7 @@ pub struct CheatOptions {
     pub perfect_target: PerfectTarget,
     /// The player never runs out of money. Not active yet.
     pub infinite_money: bool,
-    /// Every thrown ball catches. Not active yet.
+    /// Every thrown ball catches (FireRed).
     pub catch_always: bool,
     /// All experience gained is boosted. Not active yet (the size of the
     /// boost is not decided).
@@ -110,7 +110,10 @@ impl CheatOptions {
     /// True when the option changes the game today. Options that are not live
     /// can be switched in the menu and are kept, but have no effect yet.
     pub fn is_live(option: CheatOption) -> bool {
-        matches!(option, CheatOption::WildSpecies | CheatOption::WildLevel)
+        matches!(
+            option,
+            CheatOption::WildSpecies | CheatOption::WildLevel | CheatOption::CatchAlways
+        )
     }
 
     /// The wild-encounter species the game should be given, if the row is on.
@@ -160,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_wild_species_and_level_options_are_live_so_far() {
+    fn only_the_wild_and_catch_options_are_live_so_far() {
         use CheatOption::*;
         let live: Vec<_> = [
             Shiny,
@@ -174,7 +177,7 @@ mod tests {
         .into_iter()
         .filter(|option| CheatOptions::is_live(*option))
         .collect();
-        assert_eq!(live, [WildSpecies, WildLevel]);
+        assert_eq!(live, [WildSpecies, WildLevel, CatchAlways]);
     }
 
     #[test]

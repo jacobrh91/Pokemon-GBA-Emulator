@@ -788,7 +788,7 @@ fn wild_mon_rom(game_code: &[u8; 4], function: usize) -> std::path::PathBuf {
     put(0xCC, 0xE12F_FF12); // bx  r2
     put(0xD4, 0x0800_0000 + function as u32 + 1); // Thumb entry
     rom[0xAC..0xB0].copy_from_slice(game_code);
-    rom[function..function + 16].copy_from_slice(&super::wild_species::SIGNATURE);
+    rom[function..function + 16].copy_from_slice(&crate::cheats::firered::wild_species::SIGNATURE);
     rom[function + 16..function + 18].copy_from_slice(&0xE7FEu16.to_le_bytes()); // b .
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -927,4 +927,96 @@ fn the_wild_row_only_applies_to_firered_roms_and_clamps_the_level() {
 
     let (_, level, ..) = wild_run(b"BPRE", 0x8_29FC, wild(None, Some(250)), "");
     assert_eq!(level, 100);
+}
+
+/// A ROM shaped like a FireRed build around the catch check: after
+/// bookkeeping, Thumb code compares `r6` ("odds") with 0xFE exactly as the
+/// real command does, and records the outcome in `r2` (1 = caught, 2 = the
+/// shake roll). `r6` is loaded with `odds` by the ARM stub.
+fn catch_rom(game_code: &[u8; 4], function: usize, odds: u32) -> std::path::PathBuf {
+    let mut rom = vec![0u8; 0x8_3000];
+    let mut put = |offset: usize, word: u32| {
+        rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    put(0x00, 0xEA00_002E); // b 0xC0 (over the header)
+    put(0xC0, 0xE3A0_1403); // mov r1, #0x03000000  (scratch for the strb)
+    put(0xC4, 0xE3A0_0000); // mov r0, #0           (catchAttempts)
+    put(0xC8, 0xE3A0_6000 | (odds & 0xFF)); // mov r6, #odds
+    put(0xCC, 0xE59F_3004); // ldr r3, [pc, #4]     (the word at 0xD8)
+    put(0xD0, 0xE12F_FF13); // bx  r3
+    put(0xD8, 0x0800_0000 + function as u32 + 1); // Thumb entry
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    let mut put16 = |offset: usize, half: u16| {
+        rom[offset..offset + 2].copy_from_slice(&half.to_le_bytes());
+    };
+    put16(function, 0x28FE); // cmp  r0, #0xFE
+    put16(function + 2, 0xD801); // bhi  +1
+    put16(function + 4, 0x3001); // adds r0, #1
+    put16(function + 6, 0x7008); // strb r0, [r1]
+    put16(function + 8, 0x2EFE); // cmp  r6, #0xFE      <- the hook
+    put16(function + 10, 0xD92F); // bls  shake_roll
+    put16(function + 12, 0x2201); // movs r2, #1        (caught)
+    put16(function + 14, 0xE7FE); // b    .
+    // The `bls` lands 4 + 2 * 0x2F bytes after itself.
+    let shakes = function + 10 + 4 + 2 * 0x2F;
+    put16(shakes, 0x2202); // movs r2, #2               (shake roll)
+    put16(shakes + 2, 0xE7FE); // b .
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("gba-catch-test-{}-{id}.gba", std::process::id()));
+    std::fs::write(&path, rom).unwrap();
+    path
+}
+
+/// Runs the ROM and returns the outcome in `r2` and the hook address.
+fn catch_outcome(game_code: &[u8; 4], odds: u32, options: CheatOptions) -> (u32, Option<u32>) {
+    let path = catch_rom(game_code, 0x8_2A00, odds);
+    let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    emulator.initialize_gba_startup(ROM_START).unwrap();
+    emulator.set_cheat_options(options);
+    for _ in 0..40 {
+        emulator.step().unwrap();
+    }
+    (emulator.cpu().registers[2], emulator.catch_check_address())
+}
+
+fn catching() -> CheatOptions {
+    CheatOptions {
+        catch_always: true,
+        ..CheatOptions::default()
+    }
+}
+
+#[test]
+fn the_catch_cheat_turns_a_failed_odds_test_into_a_catch() {
+    // Without the cheat, low odds go to the shake roll...
+    let (outcome, hook) = catch_outcome(b"BPRE", 0x03, CheatOptions::default());
+    assert_eq!(outcome, 2, "the game's own result: the shake roll");
+    // ...the hook is the `cmp r6, #0xFE`, 8 bytes into the signature match.
+    assert_eq!(hook, Some(0x0800_0000 + 0x8_2A00 + 8));
+    // With it, the same odds are a catch.
+    assert_eq!(catch_outcome(b"BPRE", 0x03, catching()).0, 1);
+    // Odds that already pass are a catch either way.
+    assert_eq!(catch_outcome(b"BPRE", 0xFF, CheatOptions::default()).0, 1);
+    assert_eq!(catch_outcome(b"BPRE", 0xFF, catching()).0, 1);
+    // The boundary is the game's: 254 is not above 254.
+    assert_eq!(catch_outcome(b"BPRE", 0xFE, CheatOptions::default()).0, 2);
+    assert_eq!(catch_outcome(b"BPRE", 0xFE, catching()).0, 1);
+}
+
+#[test]
+fn the_catch_cheat_is_off_until_its_row_is_on_and_leaves_other_games_alone() {
+    // Other options do not turn it on.
+    let other = CheatOptions {
+        infinite_money: true,
+        wild_enabled: true,
+        wild_species: Some(150),
+        ..CheatOptions::default()
+    };
+    assert_eq!(catch_outcome(b"BPRE", 0x03, other).0, 2);
+    // A different game, even with the same bytes, is not hooked.
+    let (outcome, hook) = catch_outcome(b"AXVE", 0x03, catching());
+    assert_eq!(outcome, 2);
+    assert_eq!(hook, None);
 }

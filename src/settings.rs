@@ -6,9 +6,9 @@
 //! setting), so an old or hand-edited file never prevents a game from
 //! starting.
 
-use crate::cheat_options::{CheatOptions, MAX_LEVEL, PerfectTarget};
+use crate::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget};
+use crate::cheats::species;
 use crate::game_library;
-use crate::species;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

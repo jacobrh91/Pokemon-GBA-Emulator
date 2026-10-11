@@ -158,7 +158,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         && let Some(species) = file_wild_species
     {
         cheat_options.wild_species = Some(species);
-        let name = gba_emulator::species::name(species).unwrap_or("?");
+        let name = gba_emulator::cheats::species::name(species).unwrap_or("?");
         match wild_hook {
             Some(address) => eprintln!(
                 "cheats: the cheats file sets the wild species to {name} ({species}); tick its checkbox in the cheat menu (Tab) to use it (found CreateWildMon at {address:#010X})"

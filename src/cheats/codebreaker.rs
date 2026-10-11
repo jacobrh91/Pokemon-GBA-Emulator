@@ -33,8 +33,8 @@
 //! |---|---|
 //! | `wild_species = Dratini` | every wild encounter is that species (a name, a dex number or `0x..`), FireRed only; the function is found by a signature scan |
 
+use super::species;
 use crate::mmu::MemoryBus;
-use crate::species;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};

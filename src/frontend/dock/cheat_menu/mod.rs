@@ -27,8 +27,8 @@ mod draw;
 
 use super::Pointer;
 use crate::frontend::draw::{GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
-use gba_emulator::cheat_options::{CheatOptions, MAX_LEVEL, PerfectTarget};
-use gba_emulator::species::LAST_SPECIES;
+use gba_emulator::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget};
+use gba_emulator::cheats::species::LAST_SPECIES;
 
 /// Species-list rows: "ANY" followed by the 251 species.
 pub(super) const LIST_ENTRIES: usize = LAST_SPECIES as usize + 1;

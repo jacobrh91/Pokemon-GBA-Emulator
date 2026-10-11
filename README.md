@@ -61,7 +61,7 @@ game is played.
 | Wild Pokémon is *species* at level *n* | dropdown: ANY, then the 251 species; `-` / `+`, mouse wheel, `X` to clear for the level (empty keeps the game's) | **active** (FireRed) |
 | Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | not active yet (tagged SOON) |
 | Infinite money | | not active yet (tagged SOON) |
-| 100% catch rate | | not active yet (tagged SOON) |
+| 100% catch rate | | **active** (FireRed) |
 | All experience is boosted | | not active yet (tagged SOON); the size of the boost is not decided |
 | All Pokémon are shiny | | not active yet (tagged SOON) |
 
@@ -112,6 +112,23 @@ frame, a patch like the popular wild-encounter code crashes the game during the
 intro; switched on after the game is up it runs normally. Use such cheats on
 demand, the way a cartridge's on/off menu did.
 
+### 100% catch rate (Pokémon FireRed)
+
+A thrown ball is resolved by one battle-script command: it works out `odds`
+from the target's catch rate, the ball and the target's HP and status, and then
+tests `if (odds > 254)`. Above 254 the Pokémon is caught on the spot; otherwise
+a shake roll decides. With the row switched on, `odds` is set to 255 at that
+test, so every ball is a catch, whatever the species, level, HP or ball. It
+works in the same builds as the wild species override (the address of the test
+is found by a signature scan of the ROM, like `CreateWildMon`; the table in
+`src/cheats/firered/mod.rs` lists the addresses).
+
+In the game, a thrown Poké Ball at a wild level-100 Mewtwo at full health, which
+breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
+("Gotcha! MEWTWO was caught!") with it on, on v1.0, v1.1 and the Japanese build.
+Trainers' Pokémon cannot be caught either way: the game refuses the ball
+before this test.
+
 ### Wild species override (Pokémon FireRed)
 
 ```text
@@ -134,7 +151,7 @@ the function's first 16 bytes (a compiler prologue with no branch or pool
 operands, so identical in every build) are searched for in the ROM, and the
 override is used only if there is exactly one match in a `BPR?` (FireRed)
 cartridge. Otherwise it is ignored, with a message in the terminal. The full
-explanation is in `src/emulator/wild_species.rs`.
+explanation is in `src/cheats/firered/wild_species.rs`.
 
 | Build | Game code | Version | Function at | Checked |
 |---|---|---|---|---|
@@ -247,8 +264,13 @@ src/
   input.rs     Button bit layout
   game_library.rs  Game library and save-file handling
   settings.rs  Per-game settings file (volume, window, speed)
-  cheats.rs    CodeBreaker-format cheat codes and built-in cheat directives
-  species.rs   Names of the 251 original species (for `wild_species`)
+  cheats/      Cheats, by mechanism:
+    codebreaker.rs   CodeBreaker-format codes from a `.cheats` file (RAM writes)
+    firered/         Built-in FireRed cheats found by signature scan:
+      wild_species.rs  wild-encounter override (function arguments at its entry)
+      catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
+    options.rs       The cheat menu's options
+    species.rs       Names of the 251 original species
   state.rs     Binary codec for save states (each component saves its own fields)
   cli.rs       Command-line parsing
   frontend/    Desktop UI (minifb window, cpal audio)

@@ -4,7 +4,7 @@
 //! written at most once a second (volume drags change every frame) and again
 //! on exit, so an abnormal exit loses at most a second of changes.
 
-use gba_emulator::cheat_options::CheatOptions;
+use gba_emulator::cheats::options::CheatOptions;
 use gba_emulator::settings::{MAX_WINDOW_WIDTH, MIN_WINDOW_WIDTH, Settings};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

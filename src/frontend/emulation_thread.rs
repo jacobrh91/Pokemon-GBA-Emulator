@@ -5,7 +5,7 @@
 use super::audio_output::AudioSink;
 use super::load_jitter::{JitterBag, advance_frames};
 use gba_emulator::apu::SAMPLE_RATE;
-use gba_emulator::cheat_options::CheatOptions;
+use gba_emulator::cheats::options::CheatOptions;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::game_library;
 use gba_emulator::ppu::{Pixel, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn published_cheat_options_reach_the_emulator_once() {
-        use gba_emulator::cheat_options::CheatOptions;
+        use gba_emulator::cheats::options::CheatOptions;
         let path = spin_rom();
         let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(path).unwrap();

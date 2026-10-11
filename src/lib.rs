@@ -1,5 +1,4 @@
 pub mod apu;
-pub mod cheat_options;
 pub mod cheats;
 pub mod cpu;
 pub mod emulator;
@@ -8,5 +7,4 @@ pub mod input;
 pub mod mmu;
 pub mod ppu;
 pub mod settings;
-pub mod species;
 pub mod state;
