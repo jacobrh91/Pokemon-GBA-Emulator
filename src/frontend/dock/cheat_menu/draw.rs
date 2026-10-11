@@ -1,6 +1,8 @@
 //! Painting the cheat menu.
 
-use super::{CheatMenu, LIST_ENTRIES, LIST_ROW_HEIGHT, LIST_VISIBLE_ROWS, MenuLayout};
+use super::{
+    CheatMenu, FocusRow, LIST_ENTRIES, LIST_ROW_HEIGHT, LIST_VISIBLE_ROWS, MenuLayout, WildPart,
+};
 use crate::frontend::dock::draw::{DOCK_COLOR, FILL_COLOR, ICON_COLOR, TRACK_COLOR};
 use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
 use gba_emulator::cheats::options::{CheatOption, CheatOptions, PerfectTarget};
@@ -57,6 +59,42 @@ impl CheatMenu {
             2,
             TRACK_COLOR,
         );
+        // The row the keyboard acts on, once the keyboard has been used.
+        if let Some(row) = self.focused_row() {
+            let box_ = layout.checkbox_of(row);
+            canvas.rounded_rect(
+                Rect {
+                    x: layout.panel.x + 10,
+                    y: box_.y - 8,
+                    width: layout.panel.width - 20,
+                    height: box_.height + 16,
+                },
+                8,
+                FILL_COLOR,
+                0.2,
+            );
+        }
+        // On the wild row, the part of it the keyboard will use.
+        if self.focused_row() == Some(FocusRow::Wild) {
+            let part = match self.wild_part() {
+                WildPart::Enable => layout.wild_enable,
+                WildPart::Species => layout.dropdown,
+                WildPart::LevelDown => layout.level_minus,
+                WildPart::LevelUp => layout.level_plus,
+                WildPart::LevelClear => layout.level_clear,
+            };
+            canvas.rounded_rect(
+                Rect {
+                    x: part.x - 4,
+                    y: part.y - 4,
+                    width: part.width + 8,
+                    height: part.height + 8,
+                },
+                10,
+                FILL_COLOR,
+                0.7,
+            );
+        }
         let right = layout.panel.x + layout.panel.width - PADDING;
         let soon = |canvas: &mut Canvas, option: CheatOption, centre_y: i32| {
             if !CheatOptions::is_live(option) {
@@ -258,7 +296,10 @@ impl CheatMenu {
             1.0,
         );
         canvas.rounded_rect(layout.list, 8, DOCK_COLOR, 1.0);
-        let selected = self.options().wild_species.map_or(0, usize::from);
+        // The keyboard's cursor, or else the species in use.
+        let selected = self
+            .list_cursor()
+            .unwrap_or_else(|| self.options().wild_species.map_or(0, usize::from));
         for row in 0..LIST_VISIBLE_ROWS {
             let index = self.list_scroll() + row;
             if index >= LIST_ENTRIES {

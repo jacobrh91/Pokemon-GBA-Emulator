@@ -10,6 +10,7 @@ mod draw;
 mod layout;
 mod speed;
 
+pub use cheat_menu::MenuNav;
 use cheat_menu::{CheatMenu, MenuLayout};
 use gba_emulator::cheats::options::CheatOptions;
 use layout::{KNOB_RADIUS, Layout};
@@ -98,9 +99,15 @@ impl Dock {
         self.menu.set_file_codes_available(count);
     }
 
-    /// Closes the cheat menu (Escape).
-    pub fn close_menu(&mut self) {
-        self.menu.close();
+    /// A keyboard action on the open cheat menu.
+    pub fn menu_navigate(&mut self, nav: MenuNav) {
+        self.menu.navigate(nav);
+    }
+
+    /// Reports, every frame, whether the A key is held, so a level button
+    /// the keyboard is on keeps stepping while it stays down.
+    pub fn menu_hold_toggle(&mut self, held: bool) {
+        self.menu.hold_toggle(held, std::time::Instant::now());
     }
 
     /// Shows the dock with the cheat menu and its species list open, without

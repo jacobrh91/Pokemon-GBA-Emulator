@@ -21,6 +21,14 @@
 //! switches its row on, so a choice never silently does nothing; unticking
 //! the row's checkbox keeps the choices for later.
 //!
+//! From the keyboard, while the menu is open (the game gets no buttons then):
+//! up and down move between the rows; on the wild row left and right move
+//! between its checkbox, species field and level buttons, and A uses the one in
+//! focus (on the species field it opens the list: up and down move through the
+//! Pokémon, A chooses, B leaves without choosing); on the perfect-stats row
+//! left and right cycle the target; A switches the other rows; B closes the
+//! menu.
+//!
 //! Interaction ([`CheatMenu::update`]) is separate from drawing (`draw.rs`) so
 //! it can be tested without a window. Options that do not change the game yet
 //! (see [`CheatOptions::is_live`]) are tagged SOON in the panel; at present
@@ -32,6 +40,66 @@ use super::Pointer;
 use crate::frontend::draw::{GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
 use gba_emulator::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget};
 use gba_emulator::cheats::species::LAST_SPECIES;
+use std::time::{Duration, Instant};
+
+/// A keyboard action on the menu (the movement keys, A and B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuNav {
+    /// Move to the row above / below (wrapping); in an open species list,
+    /// move the cursor.
+    Up,
+    Down,
+    /// On the wild row, move between its checkbox, species field and level
+    /// buttons; on the perfect-stats row, cycle the target.
+    Left,
+    Right,
+    /// The A button: use the focused part (switch a row, open the species
+    /// list, press a level button), or choose the species under the cursor.
+    Toggle,
+    /// The B button: leave an open list without choosing, otherwise close the
+    /// menu.
+    Back,
+}
+
+/// The parts of the wild row the keyboard moves between.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WildPart {
+    Enable,
+    Species,
+    LevelDown,
+    LevelUp,
+    /// The X that empties the level.
+    LevelClear,
+}
+
+impl WildPart {
+    const ALL: [WildPart; 5] = [
+        Self::Enable,
+        Self::Species,
+        Self::LevelDown,
+        Self::LevelUp,
+        Self::LevelClear,
+    ];
+
+    fn stepped(self, delta: i32) -> Self {
+        let at = Self::ALL.iter().position(|part| *part == self).unwrap_or(0) as i32;
+        Self::ALL[(at + delta).clamp(0, Self::ALL.len() as i32 - 1) as usize]
+    }
+}
+
+/// The rows the keyboard can reach, top to bottom (the always-on row is only
+/// shown).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FocusRow {
+    FileCodes,
+    Wild,
+    Perfect,
+    Money,
+    Catch,
+    Experience,
+    Shiny,
+    NoEncounters,
+}
 
 /// Species-list rows: "ANY" followed by the 251 species.
 pub(super) const LIST_ENTRIES: usize = LAST_SPECIES as usize + 1;
@@ -41,10 +109,52 @@ const WHEEL_ROWS: usize = 3;
 /// Width of the strip at the list's right edge that works as a scrollbar.
 const SCROLLBAR_WIDTH: i32 = 22;
 const LIST_ROW_HEIGHT: i32 = 28;
-/// Frames a stepper button must be held before it starts repeating, and the
-/// interval between repeats afterwards.
-const REPEAT_DELAY_FRAMES: u32 = 24;
-const REPEAT_INTERVAL_FRAMES: u32 = 3;
+/// How long a stepper button must be held before it starts repeating, the
+/// interval between repeats, and the faster interval after
+/// `FAST_AFTER_REPEATS` repeats. These are wall-clock times, so holding feels
+/// the same whatever rate the window is drawn at.
+const REPEAT_DELAY: Duration = Duration::from_millis(400);
+const REPEAT_INTERVAL: Duration = Duration::from_millis(70);
+const FAST_REPEAT_INTERVAL: Duration = Duration::from_millis(30);
+const FAST_AFTER_REPEATS: u32 = 10;
+
+/// A stepper button being held.
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    /// The step direction of the button (-1 or +1).
+    delta: i32,
+    since: Instant,
+    last_step: Instant,
+    repeats: u32,
+}
+
+impl Hold {
+    fn new(delta: i32, now: Instant) -> Self {
+        Self {
+            delta,
+            since: now,
+            last_step: now,
+            repeats: 0,
+        }
+    }
+
+    /// Whether another step is due at `now`: after the delay, then at the
+    /// repeat interval, which shortens the longer the button stays down.
+    fn step_due(&mut self, now: Instant) -> bool {
+        let interval = if self.repeats >= FAST_AFTER_REPEATS {
+            FAST_REPEAT_INTERVAL
+        } else {
+            REPEAT_INTERVAL
+        };
+        let due = now.duration_since(self.since) >= REPEAT_DELAY
+            && now.duration_since(self.last_step) >= interval;
+        if due {
+            self.last_step = now;
+            self.repeats += 1;
+        }
+        due
+    }
+}
 
 pub(super) const PANEL_WIDTH: i32 = 820;
 /// Space the row checkbox takes before a row's own controls.
@@ -205,6 +315,20 @@ impl MenuLayout {
         }
     }
 
+    /// The checkbox of a keyboard-reachable row.
+    pub(super) fn checkbox_of(&self, row: FocusRow) -> Rect {
+        match row {
+            FocusRow::FileCodes => self.file_codes.unwrap_or(self.wild_enable),
+            FocusRow::Wild => self.wild_enable,
+            FocusRow::Perfect => self.perfect_enable,
+            FocusRow::Money => self.money,
+            FocusRow::Catch => self.catch,
+            FocusRow::Experience => self.exp_boost,
+            FocusRow::Shiny => self.shiny,
+            FocusRow::NoEncounters => self.no_encounters,
+        }
+    }
+
     /// The rectangle of row `index` of the perfect-stats list.
     pub(super) fn perfect_row(&self, index: usize) -> Rect {
         Rect {
@@ -234,12 +358,23 @@ pub(super) struct CheatMenu {
     perfect_list_open: bool,
     /// Index of the first visible species-list row (0 is "ANY").
     list_scroll: usize,
-    /// Frames a stepper button has been held, for auto-repeat.
-    held_frames: u32,
+    /// The stepper button being held with the mouse, for auto-repeat.
+    hold: Option<Hold>,
+    /// The same for the A key held on a stepper button.
+    key_hold: Option<Hold>,
     changed: bool,
     /// Number of code lines in the cheats file; the file row shows when
     /// this is not zero.
     file_codes_available: usize,
+    /// The row the keyboard acts on, and whether it is drawn (it is once the
+    /// keyboard has been used since the menu opened).
+    focus: usize,
+    focus_visible: bool,
+    /// The part of the wild row that has the focus.
+    wild_part: WildPart,
+    /// The species-list row under the keyboard's cursor (0 is "ANY") while the
+    /// list is driven from the keyboard.
+    list_cursor: Option<usize>,
 }
 
 impl CheatMenu {
@@ -250,10 +385,189 @@ impl CheatMenu {
             dropdown_open: false,
             perfect_list_open: false,
             list_scroll: 0,
-            held_frames: 0,
+            hold: None,
+            key_hold: None,
             changed: false,
             file_codes_available: 0,
+            focus: 0,
+            focus_visible: false,
+            wild_part: WildPart::Enable,
+            list_cursor: None,
         }
+    }
+
+    /// The rows the keyboard reaches, top to bottom.
+    fn focus_rows(&self) -> Vec<FocusRow> {
+        let mut rows = Vec::with_capacity(8);
+        if self.has_file_row() {
+            rows.push(FocusRow::FileCodes);
+        }
+        rows.extend([
+            FocusRow::Wild,
+            FocusRow::Perfect,
+            FocusRow::Money,
+            FocusRow::Catch,
+            FocusRow::Experience,
+            FocusRow::Shiny,
+            FocusRow::NoEncounters,
+        ]);
+        rows
+    }
+
+    /// The row that has the keyboard focus, if it is to be drawn.
+    pub(super) fn focused_row(&self) -> Option<FocusRow> {
+        let rows = self.focus_rows();
+        self.focus_visible
+            .then(|| rows[self.focus.min(rows.len() - 1)])
+    }
+
+    /// The part of the wild row that has the focus.
+    pub(super) fn wild_part(&self) -> WildPart {
+        self.wild_part
+    }
+
+    /// The list row under the keyboard's cursor, while it drives the list.
+    pub(super) fn list_cursor(&self) -> Option<usize> {
+        self.list_cursor.filter(|_| self.dropdown_open)
+    }
+
+    /// Moves the keyboard's list cursor by `delta` rows, wrapping, and keeps
+    /// it on screen.
+    fn move_list_cursor(&mut self, delta: i32) {
+        let at = self.list_cursor.unwrap_or_else(|| self.selected_row()) as i32;
+        let next = (at + delta).rem_euclid(LIST_ENTRIES as i32) as usize;
+        self.list_cursor = Some(next);
+        if next < self.list_scroll {
+            self.list_scroll = next;
+        } else if next >= self.list_scroll + LIST_VISIBLE_ROWS {
+            self.list_scroll = next + 1 - LIST_VISIBLE_ROWS;
+        }
+    }
+
+    /// Acts on a keyboard press.
+    pub(super) fn navigate(&mut self, nav: MenuNav) {
+        if !self.open {
+            return;
+        }
+        // B leaves a list without choosing; with none open it closes the menu.
+        if nav == MenuNav::Back {
+            if self.dropdown_open || self.perfect_list_open {
+                self.dropdown_open = false;
+                self.perfect_list_open = false;
+                self.list_cursor = None;
+            } else {
+                self.close();
+            }
+            return;
+        }
+        // The species list: up and down move the cursor, A chooses.
+        if self.dropdown_open {
+            match nav {
+                MenuNav::Up => self.move_list_cursor(-1),
+                MenuNav::Down => self.move_list_cursor(1),
+                MenuNav::Toggle => {
+                    let index = self.list_cursor.unwrap_or_else(|| self.selected_row());
+                    let mut options = self.options;
+                    options.wild_species = (index != 0).then_some(index as u16);
+                    self.set(options);
+                    self.dropdown_open = false;
+                    self.list_cursor = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+        // The target list was opened with the mouse; the keys dismiss it.
+        self.perfect_list_open = false;
+        // The first key only shows where the focus is (the top row), so a
+        // press is never spent on a row that was not on show.
+        if !self.focus_visible {
+            self.focus_visible = true;
+            self.focus = 0;
+            return;
+        }
+        let rows = self.focus_rows();
+        self.focus = self.focus.min(rows.len() - 1);
+        let row = rows[self.focus];
+        let mut options = self.options;
+        match nav {
+            MenuNav::Up => self.focus = (self.focus + rows.len() - 1) % rows.len(),
+            MenuNav::Down => self.focus = (self.focus + 1) % rows.len(),
+            MenuNav::Left | MenuNav::Right => {
+                let delta = if nav == MenuNav::Left { -1 } else { 1 };
+                match row {
+                    FocusRow::Wild => self.wild_part = self.wild_part.stepped(delta),
+                    FocusRow::Perfect => {
+                        let all = PerfectTarget::ALL;
+                        let at = all
+                            .iter()
+                            .position(|target| *target == options.perfect_target)
+                            .unwrap_or(0);
+                        let next = (at as i32 + delta).rem_euclid(all.len() as i32);
+                        options.perfect_target = all[next as usize];
+                    }
+                    _ => {}
+                }
+            }
+            MenuNav::Toggle => match row {
+                FocusRow::FileCodes => options.file_codes = !options.file_codes,
+                FocusRow::Wild => match self.wild_part {
+                    WildPart::Enable => options.wild_enabled = !options.wild_enabled,
+                    WildPart::Species => {
+                        self.dropdown_open = true;
+                        self.list_cursor = Some(self.selected_row());
+                        self.scroll_to_selection();
+                    }
+                    WildPart::LevelDown => {
+                        options.wild_level = Self::stepped_level(options.wild_level, -1);
+                    }
+                    WildPart::LevelUp => {
+                        options.wild_level = Self::stepped_level(options.wild_level, 1);
+                    }
+                    WildPart::LevelClear => options.wild_level = None,
+                },
+                FocusRow::Perfect => options.perfect_enabled = !options.perfect_enabled,
+                FocusRow::Money => options.infinite_money = !options.infinite_money,
+                FocusRow::Catch => options.catch_always = !options.catch_always,
+                FocusRow::Experience => options.exp_boost = !options.exp_boost,
+                FocusRow::Shiny => options.shiny = !options.shiny,
+                FocusRow::NoEncounters => options.no_encounters = !options.no_encounters,
+            },
+            MenuNav::Back => {}
+        }
+        self.set(options);
+    }
+
+    /// Called every frame with whether the A key (Space or Enter) is held:
+    /// while it stays down on a level button, the step repeats like a held
+    /// mouse button. The press itself is a [`MenuNav::Toggle`].
+    pub(super) fn hold_toggle(&mut self, held: bool, now: Instant) {
+        let delta = match (self.open, self.focused_row(), self.wild_part) {
+            (true, Some(FocusRow::Wild), WildPart::LevelDown)
+                if held && !self.dropdown_open && !self.perfect_list_open =>
+            {
+                -1
+            }
+            (true, Some(FocusRow::Wild), WildPart::LevelUp)
+                if held && !self.dropdown_open && !self.perfect_list_open =>
+            {
+                1
+            }
+            _ => {
+                self.key_hold = None;
+                return;
+            }
+        };
+        let mut hold = self
+            .key_hold
+            .filter(|hold| hold.delta == delta)
+            .unwrap_or_else(|| Hold::new(delta, now));
+        if hold.step_due(now) {
+            let mut options = self.options;
+            options.wild_level = Self::stepped_level(options.wild_level, delta);
+            self.set(options);
+        }
+        self.key_hold = Some(hold);
     }
 
     /// Tells the menu how many codes the cheats file holds; with none, the
@@ -305,12 +619,16 @@ impl CheatMenu {
         self.open = !self.open;
         self.dropdown_open = false;
         self.perfect_list_open = false;
+        self.focus_visible = false;
+        self.list_cursor = None;
     }
 
     pub(super) fn close(&mut self) {
         self.open = false;
         self.dropdown_open = false;
         self.perfect_list_open = false;
+        self.focus_visible = false;
+        self.list_cursor = None;
     }
 
     /// Opens the species list (for the launch smoke test, which has no mouse).
@@ -383,12 +701,24 @@ impl CheatMenu {
     /// left button went down. Returns true when the pointer is over the menu
     /// (so the dock beneath should not also react).
     pub(super) fn update(&mut self, pointer: Pointer, pressed: bool, layout: &MenuLayout) -> bool {
+        self.update_at(pointer, pressed, layout, Instant::now())
+    }
+
+    /// [`Self::update`] at a given time, which the auto-repeat of the stepper
+    /// buttons depends on.
+    pub(super) fn update_at(
+        &mut self,
+        pointer: Pointer,
+        pressed: bool,
+        layout: &MenuLayout,
+        now: Instant,
+    ) -> bool {
         if !self.open {
-            self.held_frames = 0;
+            self.hold = None;
             return false;
         }
         let Some((x, y)) = pointer.position else {
-            self.held_frames = 0;
+            self.hold = None;
             return false;
         };
         let over_panel = layout.panel.contains(x, y);
@@ -421,10 +751,10 @@ impl CheatMenu {
                 self.scroll_to_selection();
             } else if layout.level_minus.contains(x, y) {
                 options.wild_level = Self::stepped_level(options.wild_level, -1);
-                self.held_frames = 0;
+                self.hold = None;
             } else if layout.level_plus.contains(x, y) {
                 options.wild_level = Self::stepped_level(options.wild_level, 1);
-                self.held_frames = 0;
+                self.hold = None;
             } else if layout.level_clear.contains(x, y) {
                 options.wild_level = None;
             } else if layout.perfect_dropdown.contains(x, y) {
@@ -451,17 +781,17 @@ impl CheatMenu {
             None
         };
         match held_delta {
-            Some(delta) if !pressed => {
-                self.held_frames += 1;
-                if self.held_frames >= REPEAT_DELAY_FRAMES
-                    && (self.held_frames - REPEAT_DELAY_FRAMES)
-                        .is_multiple_of(REPEAT_INTERVAL_FRAMES)
-                {
+            Some(delta) => {
+                let mut hold = self
+                    .hold
+                    .filter(|hold| hold.delta == delta && !pressed)
+                    .unwrap_or_else(|| Hold::new(delta, now));
+                if hold.step_due(now) {
                     options.wild_level = Self::stepped_level(options.wild_level, delta);
                 }
+                self.hold = Some(hold);
             }
-            Some(_) => {}
-            None => self.held_frames = 0,
+            None => self.hold = None,
         }
 
         // The wheel over the level controls steps by one.

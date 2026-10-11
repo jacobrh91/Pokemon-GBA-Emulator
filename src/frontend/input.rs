@@ -1,5 +1,6 @@
 //! Keyboard bindings and the key-driven actions.
 
+use super::dock::MenuNav;
 use gba_emulator::input::{self, Buttons};
 use minifb::Key;
 
@@ -24,9 +25,49 @@ pub(super) const LOAD_STATE_KEY: Key = Key::Key1;
 
 /// Tab opens and closes the cheat menu (the same as its dock button).
 pub(super) const CHEAT_MENU_KEY: Key = Key::Tab;
-/// The key of the console's B button also closes an open cheat menu, as B
-/// backs out of menus in the games. The press still reaches the game.
-pub(super) const CHEAT_MENU_BACK_KEY: Key = Key::C;
+
+/// Keys that act on the open cheat menu, and whether holding one repeats.
+/// The movement keys and the arrow keys move; Space (or Enter) is the A
+/// button and C the B button.
+pub(super) const MENU_KEYS: [(Key, MenuNav, bool); 12] = [
+    (Key::W, MenuNav::Up, true),
+    (Key::Up, MenuNav::Up, true),
+    (Key::S, MenuNav::Down, true),
+    (Key::Down, MenuNav::Down, true),
+    (Key::A, MenuNav::Left, true),
+    (Key::Left, MenuNav::Left, true),
+    (Key::D, MenuNav::Right, true),
+    (Key::Right, MenuNav::Right, true),
+    (Key::Space, MenuNav::Toggle, false),
+    (Key::Enter, MenuNav::Toggle, false),
+    (Key::C, MenuNav::Back, false),
+    (Key::Backspace, MenuNav::Back, false),
+];
+
+/// Keeps the game's buttons from seeing the keys that drive the menu: no
+/// button gets through while the menu is open, nor afterwards until every
+/// game key has been released (so the press that closed it, or one held to
+/// move around in it, is not taken by the game as its own).
+#[derive(Debug, Default)]
+pub(super) struct ButtonGate {
+    held_back: bool,
+}
+
+impl ButtonGate {
+    pub(super) fn apply(&mut self, menu_open: bool, pressed: Buttons) -> Buttons {
+        if menu_open {
+            self.held_back = true;
+            return 0;
+        }
+        if self.held_back {
+            if pressed == 0 {
+                self.held_back = false;
+            }
+            return 0;
+        }
+        pressed
+    }
+}
 
 /// What a press of Escape should do.
 #[derive(Debug, PartialEq, Eq)]
@@ -62,6 +103,52 @@ pub(super) fn fast_forward_held(is_down: impl Fn(Key) -> bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_gets_no_buttons_while_the_menu_is_open_or_until_they_are_released() {
+        let mut gate = ButtonGate::default();
+        // Closed menu: buttons pass.
+        assert_eq!(
+            gate.apply(false, input::A | input::UP),
+            input::A | input::UP
+        );
+        // Open: nothing passes, whatever is pressed.
+        assert_eq!(gate.apply(true, input::UP), 0);
+        assert_eq!(gate.apply(true, 0), 0);
+        // Closed again with a key still held: still nothing...
+        assert_eq!(gate.apply(false, input::B), 0);
+        assert_eq!(gate.apply(false, input::B), 0);
+        // ...until everything is released; then buttons pass again.
+        assert_eq!(gate.apply(false, 0), 0);
+        assert_eq!(gate.apply(false, input::B), input::B);
+    }
+
+    #[test]
+    fn every_menu_key_is_distinct_and_the_game_keys_agree_with_them() {
+        for (index, (key, ..)) in MENU_KEYS.iter().enumerate() {
+            assert!(
+                MENU_KEYS[index + 1..]
+                    .iter()
+                    .all(|(other, ..)| other != key),
+                "{key:?} listed twice"
+            );
+        }
+        // The same keys that are the game's buttons are the menu's actions.
+        for (key, nav, _) in MENU_KEYS {
+            let button = KEY_BINDINGS.iter().find(|(k, _)| *k == key).map(|b| b.1);
+            let expected = match nav {
+                MenuNav::Up => Some(input::UP),
+                MenuNav::Down => Some(input::DOWN),
+                MenuNav::Left => Some(input::LEFT),
+                MenuNav::Right => Some(input::RIGHT),
+                MenuNav::Toggle => Some(input::A),
+                MenuNav::Back => Some(input::B),
+            };
+            if let Some(button) = button {
+                assert_eq!(Some(button), expected, "{key:?}");
+            }
+        }
+    }
 
     #[test]
     fn escape_leaves_full_screen_and_only_quits_from_a_window() {

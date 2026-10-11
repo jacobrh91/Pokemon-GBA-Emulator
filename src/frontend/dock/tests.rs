@@ -514,7 +514,7 @@ fn restored_options_are_not_reported_as_a_change() {
 }
 
 #[test]
-fn escape_closes_the_menu_through_close_menu() {
+fn back_closes_the_menu() {
     let layout = Layout::new(W, H);
     let mut dock = Dock::new(0.5);
     settle(
@@ -523,7 +523,7 @@ fn escape_closes_the_menu_through_close_menu() {
     );
     click_at(&mut dock, centre_of(layout.cheats));
     assert!(dock.menu_open());
-    dock.close_menu();
+    dock.menu_navigate(MenuNav::Back);
     assert!(!dock.menu_open());
 }
 
@@ -560,7 +560,7 @@ fn tab_opens_and_closes_the_menu_the_same_way_the_button_does() {
     click_at(&mut dock, centre_of(layout.cheats));
     assert!(!dock.menu_open(), "the button closes a menu Tab opened");
     dock.toggle_menu();
-    dock.close_menu();
+    dock.menu_navigate(MenuNav::Back);
     assert!(!dock.menu_open());
 }
 

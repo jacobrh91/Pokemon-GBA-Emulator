@@ -67,6 +67,19 @@ game is played.
 | No random encounters | | **active** (FireRed) |
 | TMs are infinitely usable | | **always on** (FireRed): shown ticked at the bottom, with no switch |
 
+- **From the keyboard**, while the menu is open the game gets no buttons and
+  the movement keys drive the menu. The first press only shows which row has the
+  focus (a highlighted band, starting on the top row). Then **W / S** (or Up /
+  Down) move between the rows and wrap, and **Space** (or Enter) is the A
+  button: it switches the focused row on or off. On the wild row, **A / D** (or
+  Left / Right) move between its checkbox, species field and level down / up
+  buttons, and A uses the one in focus: on a level button it steps the level, on
+  the species field it opens the species list, where W / S move through the
+  Pokémon, A chooses the one under the cursor and **C** (the B button) leaves the
+  list without choosing. On the perfect-stats row, A / D cycle the target. With
+  no list open, C, Backspace or Escape close the menu (as does Tab). After it
+  closes the game ignores any key that is still held, until it is released, so
+  the press that closed the menu is not taken by the game.
 - **A row that is switched off keeps its choices**, shown dimmed, so you can
   turn it back on without choosing again.
 - **Choosing in a row switches it on**: picking a species or a level, or
@@ -347,12 +360,13 @@ misread.
 |---|---|
 | W A S D | D-pad |
 | Space | A |
-| C | B (also closes the cheat menu) |
+| C | B |
 | Q / E | L / R |
 | X | Start |
 | V | Select |
 | Shift (hold) | Fast-forward |
 | Tab | Open or close the cheat menu |
+| W / S, A / D, Space, C (or the arrow keys, Enter, Backspace) | While the cheat menu is open, drive it instead of the game (see below) |
 | 0 | Save state (floppy-disk icon, top right) |
 | 1 | Load the saved state (disk with a circular arrow) |
 | F11 or Cmd+F | Toggle full screen |

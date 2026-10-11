@@ -9,7 +9,7 @@ mod settings_sync;
 mod window_control;
 
 use audio_output::AudioOutput;
-use dock::{Dock, Pointer, SpeedSetting};
+use dock::{Dock, MenuNav, Pointer, SpeedSetting};
 use emulation_thread::{STATE_LOAD, STATE_LOADED, STATE_SAVE, STATE_SAVED, Shared, emulation_loop};
 use gba_emulator::cheats::Cheats;
 use gba_emulator::emulator::Emulator;
@@ -18,7 +18,7 @@ use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use gba_emulator::settings::Settings;
 use input::{
-    CHEAT_MENU_BACK_KEY, CHEAT_MENU_KEY, EscapeAction, LOAD_STATE_KEY, SAVE_STATE_KEY,
+    ButtonGate, CHEAT_MENU_KEY, EscapeAction, LOAD_STATE_KEY, MENU_KEYS, SAVE_STATE_KEY,
     buttons_from_keys, escape_action, fast_forward_held,
 };
 use minifb::{Key, MouseMode, Scale, ScaleMode, Window, WindowOptions};
@@ -186,6 +186,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     let mut sync = SettingsSync::new(settings_path, settings);
     sync.record_cheat_scan(cheat_scan);
     let mut frames_shown = 0_u32;
+    let mut button_gate = ButtonGate::default();
     let mut last_state_notice = 0_u32;
     let mut state_notice_frames = 0_u32;
     let mut frame_pixels = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT];
@@ -196,8 +197,9 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         // Escape leaves full screen first; only from a window does it quit.
         let escape = window.is_key_pressed(Key::Escape, minifb::KeyRepeat::No);
         if escape && dock.menu_open() {
-            // An open cheat menu takes Escape first.
-            dock.close_menu();
+            // An open cheat menu takes Escape first, as the B button does:
+            // it leaves an open list, or else closes the menu.
+            dock.menu_navigate(MenuNav::Back);
         } else {
             match escape_action(escape, window_control::is_fullscreen(&window)) {
                 EscapeAction::None => {}
@@ -208,17 +210,37 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         if window.is_key_pressed(CHEAT_MENU_KEY, minifb::KeyRepeat::No) {
             dock.toggle_menu();
         }
-        if window.is_key_pressed(CHEAT_MENU_BACK_KEY, minifb::KeyRepeat::No) && dock.menu_open() {
-            dock.close_menu();
-        }
         if window.is_key_pressed(SAVE_STATE_KEY, minifb::KeyRepeat::No) {
             shared.state_request.store(STATE_SAVE, Ordering::Relaxed);
         }
         if window.is_key_pressed(LOAD_STATE_KEY, minifb::KeyRepeat::No) {
             shared.state_request.store(STATE_LOAD, Ordering::Relaxed);
         }
+        // While the cheat menu is open the movement keys drive it, and the
+        // game sees no buttons.
+        if dock.menu_open() {
+            for (key, nav, repeats) in MENU_KEYS {
+                let repeat = if repeats {
+                    minifb::KeyRepeat::Yes
+                } else {
+                    minifb::KeyRepeat::No
+                };
+                if window.is_key_pressed(key, repeat) {
+                    dock.menu_navigate(nav);
+                }
+            }
+        }
+        dock.menu_hold_toggle(
+            dock.menu_open()
+                && MENU_KEYS
+                    .iter()
+                    .any(|(key, nav, _)| *nav == MenuNav::Toggle && window.is_key_down(*key)),
+        );
         shared.buttons.store(
-            buttons_from_keys(|key| window.is_key_down(key)),
+            button_gate.apply(
+                dock.menu_open(),
+                buttons_from_keys(|key| window.is_key_down(key)),
+            ),
             Ordering::Relaxed,
         );
 
