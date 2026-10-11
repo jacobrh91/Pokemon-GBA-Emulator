@@ -74,8 +74,10 @@ fn arm_register_barrel_shifts_follow_zero_and_boundary_rules() {
 
 #[test]
 fn set_flag_updates_only_the_requested_cpsr_bit() {
-    let mut cpu = Cpu::default();
-    cpu.cpsr = 0x0000_000F;
+    let mut cpu = Cpu {
+        cpsr: 0x0000_000F,
+        ..Cpu::default()
+    };
 
     cpu.set_flag(N_FLAG, true);
     assert_eq!(cpu.cpsr, N_FLAG | 0x0000_000F);

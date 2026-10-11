@@ -2,7 +2,9 @@ mod cli;
 mod frontend;
 
 use cli::{Command, USAGE, parse_args};
-use gba_emulator::library::{InstallOutcome, LIBRARY_ENV, Library, sibling_save_path};
+use gba_emulator::game_library::{
+    GAME_LIBRARY_ENV, GameLibrary, InstallOutcome, sibling_save_path,
+};
 use std::path::{Path, PathBuf};
 
 fn main() -> std::process::ExitCode {
@@ -25,18 +27,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Help => println!("{USAGE}"),
         Command::List => {
-            let library = Library::default_location()?;
-            let roms = library.list()?;
+            let games = GameLibrary::default_location()?;
+            let roms = games.list()?;
             if roms.is_empty() {
-                println!("no ROMs installed in {}", library.root().display());
+                println!("no ROMs installed in {}", games.root().display());
             }
             for rom in roms {
                 println!("{}", rom.name);
             }
         }
         Command::Install { rom, force } => {
-            let library = Library::default_location()?;
-            let (installed, outcome) = library.install(&rom, force)?;
+            let games = GameLibrary::default_location()?;
+            let (installed, outcome) = games.install(&rom, force)?;
             let verb = match outcome {
                 InstallOutcome::Installed => "installed",
                 InstallOutcome::AlreadyInstalled => "already installed",
@@ -61,11 +63,11 @@ fn resolve_rom(target: &str) -> Result<(PathBuf, PathBuf), Box<dyn std::error::E
     if Path::new(target).is_file() {
         return Ok((PathBuf::from(target), sibling_save_path(Path::new(target))));
     }
-    let library = Library::default_location()?;
-    let installed = library.find(target).map_err(|error| {
+    let games = GameLibrary::default_location()?;
+    let installed = games.find(target).map_err(|error| {
         format!(
-            "{error}\n(looked in {}; set {LIBRARY_ENV} to use another library)",
-            library.root().display()
+            "{error}\n(looked in {}; set {GAME_LIBRARY_ENV} to use another game library)",
+            games.root().display()
         )
     })?;
     let save_path = installed.save_path();

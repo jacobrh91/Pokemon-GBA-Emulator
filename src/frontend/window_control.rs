@@ -27,6 +27,19 @@ pub fn pointer_in_picture_view(window: &Window) -> Option<((f32, f32), (f32, f32
     }
 }
 
+/// The window's content size in points, excluding the title bar. While full
+/// screen this is the full-screen size, so callers only use it when windowed.
+/// Falls back to minifb's (possibly stale) size where the platform has no
+/// live value.
+pub fn content_size(window: &Window) -> (f32, f32) {
+    #[cfg(target_os = "macos")]
+    if let Some(size) = mac::content_size(window) {
+        return size;
+    }
+    let (width, height) = window.get_size();
+    (width as f32, height as f32)
+}
+
 /// Whether the left mouse button is physically down, read from the window
 /// system rather than from events delivered to the window.
 ///

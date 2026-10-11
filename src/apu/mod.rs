@@ -5,6 +5,8 @@
 //! The APU does not own the I/O registers. The memory bus keeps them in its
 //! register file and lends it to [`Apu::advance`] and [`Apu::register_written`].
 
+mod state;
+
 use crate::mmu::registers::{
     SOUND1CNT_H, SOUND1CNT_L, SOUND1CNT_X, SOUND2CNT_H, SOUND2CNT_L, SOUND3CNT_H, SOUND3CNT_L,
     SOUND3CNT_X, SOUND4CNT_H, SOUND4CNT_L, SOUNDBIAS, SOUNDCNT_H, SOUNDCNT_L, SOUNDCNT_X,
@@ -422,7 +424,7 @@ impl Apu {
             reg16(registers, SOUND3CNT_X),
             reg16(registers, SOUND4CNT_H),
         ];
-        if step % 2 == 0 {
+        if step.is_multiple_of(2) {
             self.square[0].clock_length(length_control[0] & 0x4000 != 0);
             self.square[1].clock_length(length_control[1] & 0x4000 != 0);
             if length_control[2] & 0x4000 != 0 && self.wave.length > 0 {
@@ -472,7 +474,7 @@ impl Apu {
         };
         let index = self.wave.position % 32;
         let byte = self.wave_ram[bank][index / 2];
-        let nibble = if index % 2 == 0 {
+        let nibble = if index.is_multiple_of(2) {
             byte >> 4
         } else {
             byte & 0xF

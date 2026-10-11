@@ -8,6 +8,7 @@ mod dma;
 mod interrupts;
 pub mod registers;
 mod save;
+mod state;
 mod timers;
 mod waitstates;
 use crate::apu::{self, Apu};

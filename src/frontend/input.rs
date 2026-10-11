@@ -18,6 +18,10 @@ pub(super) const KEY_BINDINGS: [(Key, Buttons); 10] = [
     (Key::Q, input::L),
 ];
 
+/// Save-state keys: 0 writes the state, 1 plays it back.
+pub(super) const SAVE_STATE_KEY: Key = Key::Key0;
+pub(super) const LOAD_STATE_KEY: Key = Key::Key1;
+
 /// What a press of Escape should do.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum EscapeAction {

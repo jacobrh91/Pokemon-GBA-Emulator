@@ -1,11 +1,12 @@
-//! A per-user library of installed ROMs.
+//! The per-user game library: installed ROMs, each with its own `saves/`
+//! directory, plus the helpers for reading and writing save files.
 //!
 //! ```text
 //! <root>/
-//!   Pokemon Fire Red (v1.0)/
-//!     Pokemon Fire Red (v1.0).gba
+//!   <My Pokemon ROM>/
+//!     <My Pokemon ROM>.gba
 //!     saves/
-//!       Pokemon Fire Red (v1.0).sav
+//!       <My Pokemon ROM>.sav
 //! ```
 //!
 //! Installing never touches an existing `saves/` directory, so reinstalling or
@@ -17,7 +18,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Environment variable that overrides the platform data directory.
-pub const LIBRARY_ENV: &str = "GBA_EMULATOR_LIBRARY";
+pub const GAME_LIBRARY_ENV: &str = "GBA_EMULATOR_LIBRARY";
 const SAVES_DIR: &str = "saves";
 const ROM_EXTENSION: &str = "gba";
 const MIN_ROM_BYTES: u64 = 0xC0; // cartridge header
@@ -59,19 +60,19 @@ pub enum InstallOutcome {
     Replaced,
 }
 
-pub struct Library {
+pub struct GameLibrary {
     root: PathBuf,
 }
 
-impl Library {
+impl GameLibrary {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// The default library: `$GBA_EMULATOR_LIBRARY` if set, otherwise the
+    /// The default game library: `$GBA_EMULATOR_LIBRARY` if set, otherwise the
     /// platform's per-user data directory.
     pub fn default_location() -> io::Result<Self> {
-        if let Some(path) = std::env::var_os(LIBRARY_ENV).filter(|p| !p.is_empty()) {
+        if let Some(path) = std::env::var_os(GAME_LIBRARY_ENV).filter(|p| !p.is_empty()) {
             return Ok(Self::new(path));
         }
         let home = || {
@@ -99,7 +100,7 @@ impl Library {
         &self.root
     }
 
-    /// Copies `source` into the library under its file name. Existing saves
+    /// Copies `source` into the game library under its file name. Existing saves
     /// are never modified. Replacing a different ROM of the same name
     /// requires `force`.
     pub fn install(
@@ -288,7 +289,7 @@ mod tests {
     #[test]
     fn install_creates_rom_and_saves_directories() {
         let work = scratch();
-        let library = Library::new(work.join("library"));
+        let library = GameLibrary::new(work.join("library"));
         let source = write_rom(&work, "Test Game (v1.0).gba", 1);
 
         let (rom, outcome) = library.install(&source, false).unwrap();
@@ -313,7 +314,7 @@ mod tests {
     #[test]
     fn reinstalling_the_same_rom_is_a_no_op_that_keeps_saves() {
         let work = scratch();
-        let library = Library::new(work.join("library"));
+        let library = GameLibrary::new(work.join("library"));
         let source = write_rom(&work, "Game.gba", 2);
         let (rom, _) = library.install(&source, false).unwrap();
         fs::write(rom.save_path(), b"progress").unwrap();
@@ -327,7 +328,7 @@ mod tests {
     #[test]
     fn replacing_a_different_rom_needs_force_and_keeps_saves() {
         let work = scratch();
-        let library = Library::new(work.join("library"));
+        let library = GameLibrary::new(work.join("library"));
         let (rom, _) = library
             .install(&write_rom(&work, "Game.gba", 3), false)
             .unwrap();
@@ -349,7 +350,7 @@ mod tests {
     #[test]
     fn invalid_roms_are_rejected_without_creating_anything() {
         let work = scratch();
-        let library = Library::new(work.join("library"));
+        let library = GameLibrary::new(work.join("library"));
         let tiny = work.join("tiny.gba");
         fs::write(&tiny, [0u8; 8]).unwrap();
         assert_eq!(
@@ -396,7 +397,7 @@ mod tests {
     #[test]
     fn list_and_find_use_exact_then_unique_prefix_matches() {
         let work = scratch();
-        let library = Library::new(work.join("library"));
+        let library = GameLibrary::new(work.join("library"));
         assert!(library.list().unwrap().is_empty());
         for name in [
             "Pokemon Fire Red.gba",

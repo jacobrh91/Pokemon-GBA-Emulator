@@ -43,8 +43,8 @@ impl MemoryBus {
             if index > 0 && control & (1 << 2) != 0 {
                 let source_ticks = cascade_ticks;
                 cascade_ticks = self.advance_timer(index, source_ticks);
-                if index < 2 {
-                    audio_overflows[index] = cascade_ticks;
+                if let Some(slot) = audio_overflows.get_mut(index) {
+                    *slot = cascade_ticks;
                 }
                 continue;
             }
@@ -54,8 +54,8 @@ impl MemoryBus {
             let ticks = accumulated >> shift;
             self.timers[index].prescaler_cycles = (accumulated & ((1 << shift) - 1)) as u16;
             cascade_ticks = self.advance_timer(index, ticks);
-            if index < 2 {
-                audio_overflows[index] = cascade_ticks;
+            if let Some(slot) = audio_overflows.get_mut(index) {
+                *slot = cascade_ticks;
             }
         }
         audio_overflows

@@ -600,3 +600,108 @@ fn waitcnt_writes_and_resets_refresh_the_cached_game_pak_timings() {
     assert_eq!(bus.transfer_cycles(ROM_START, 2, false).unwrap(), 4);
     assert_eq!(bus.transfer_cycles(0x0E00_0000, 1, false).unwrap(), 4);
 }
+
+fn state_bytes(bus: &MemoryBus) -> Vec<u8> {
+    let mut writer = crate::state::StateWriter::new();
+    bus.save_state(&mut writer);
+    writer.into_bytes()
+}
+
+/// A bus with timers counting, a PSG channel and the FIFO running, a DMA
+/// waiting for VBlank, RAM written, and some time elapsed.
+fn busy_bus() -> MemoryBus {
+    let mut bus = bus_with_rom(&[0; 8]);
+    bus.write_u32(EWRAM_START + 0x100, 0xCAFE_F00D).unwrap();
+    bus.write_u32(IWRAM_START + 0x40, 0x0BAD_C0DE).unwrap();
+    bus.write_u16(0x0500_0000 + 6, 0x7FFF).unwrap();
+    // Timer 0 (prescaler 64) and a cascaded timer 1, both with IRQs.
+    bus.write_u16(IO_REG_START + 0x100, 0xF000).unwrap();
+    bus.write_u16(IO_REG_START + 0x102, 0x00C1).unwrap();
+    bus.write_u16(IO_REG_START + 0x104, 0xFF00).unwrap();
+    bus.write_u16(IO_REG_START + 0x106, 0x00C4).unwrap();
+    // Sound: master enable, a square channel, and FIFO A fed with samples.
+    bus.write_u16(IO_REG_START + 0x84, 0x0080).unwrap();
+    bus.write_u16(IO_REG_START + 0x80, 0x7777).unwrap();
+    bus.write_u16(IO_REG_START + 0x62, 0xF080).unwrap();
+    bus.write_u16(IO_REG_START + 0x64, 0x8400).unwrap();
+    for word in 0..4 {
+        bus.write_u32(IO_REG_START + 0xA0, 0x7F40_C081 + word)
+            .unwrap();
+    }
+    // A DMA channel armed for VBlank.
+    program_dma(
+        &mut bus,
+        1,
+        IWRAM_START,
+        EWRAM_START + 0x200,
+        4,
+        0x9000 | 0x0400,
+    );
+    bus.advance(100_000);
+    bus.sync();
+    // States are taken between frames, when the audio has been collected.
+    let _ = bus.take_audio_samples();
+    bus
+}
+
+#[test]
+fn bus_state_round_trips_through_a_fresh_bus() {
+    let original = busy_bus();
+    let bytes = state_bytes(&original);
+    assert_ne!(
+        bytes,
+        state_bytes(&bus_with_rom(&[0; 8])),
+        "the busy bus should not look like a new one"
+    );
+
+    let mut restored = bus_with_rom(&[0; 8]);
+    let mut reader = crate::state::StateReader::new(&bytes);
+    restored.load_state(&mut reader).unwrap();
+    assert_eq!(reader.remaining(), 0);
+
+    // Saving again reproduces every byte: nothing was dropped on the way in.
+    assert_eq!(state_bytes(&restored), bytes);
+    assert_eq!(restored.read_u32(EWRAM_START + 0x100).unwrap(), 0xCAFE_F00D);
+    assert_eq!(restored.timers[0].reload, 0xF000);
+    assert_eq!(restored.timers[1].control & 0x84, 0x84);
+}
+
+#[test]
+fn a_restored_bus_keeps_running_exactly_like_the_original() {
+    let mut original = busy_bus();
+    let bytes = state_bytes(&original);
+    let mut restored = bus_with_rom(&[0; 8]);
+    restored
+        .load_state(&mut crate::state::StateReader::new(&bytes))
+        .unwrap();
+
+    for _ in 0..40 {
+        original.advance(7_000);
+        restored.advance(7_000);
+    }
+    original.sync();
+    restored.sync();
+    assert_eq!(state_bytes(&restored), state_bytes(&original));
+    assert!(
+        restored.take_audio_samples() == original.take_audio_samples(),
+        "audio diverged after the state was restored"
+    );
+}
+
+#[test]
+fn restoring_a_state_marks_backup_memory_changed() {
+    let mut bus = busy_bus();
+    bus.write_u8(0x0E00_0000, 0x5A).unwrap();
+    let bytes = state_bytes(&bus);
+
+    let mut restored = bus_with_rom(&[0; 8]);
+    restored.take_save_dirty();
+    restored
+        .load_state(&mut crate::state::StateReader::new(&bytes))
+        .unwrap();
+    assert_eq!(restored.read_u8(0x0E00_0000).unwrap(), 0x5A);
+    assert!(
+        restored.take_save_dirty(),
+        "the battery save file must follow the restored contents"
+    );
+}

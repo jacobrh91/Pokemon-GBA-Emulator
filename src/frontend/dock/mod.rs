@@ -82,14 +82,22 @@ impl Dock {
         self.speed
     }
 
-    #[cfg(test)]
     pub fn volume(&self) -> f32 {
         self.volume
     }
 
-    #[cfg(test)]
     pub fn is_muted(&self) -> bool {
         self.muted
+    }
+
+    /// Restores the mute state (from saved settings).
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+    }
+
+    /// Restores the selected fast-forward speed (from saved settings).
+    pub fn set_speed(&mut self, speed: SpeedSetting) {
+        self.speed = speed;
     }
 
     #[cfg(test)]
@@ -164,11 +172,10 @@ impl Dock {
                 self.muted = false;
             }
         }
-        if self.dragging {
-            if let Some((x, _)) = pointer.position {
-                self.volume =
-                    ((x - layout.track.x as f32) / layout.track.width as f32).clamp(0.0, 1.0);
-            }
+        if self.dragging
+            && let Some((x, _)) = pointer.position
+        {
+            self.volume = ((x - layout.track.x as f32) / layout.track.width as f32).clamp(0.0, 1.0);
         }
     }
 }

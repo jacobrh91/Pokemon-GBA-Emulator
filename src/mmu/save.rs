@@ -2,6 +2,9 @@
 //! Backup Media", mGBA `savedata.c`). EEPROM, which is accessed through the
 //! ROM address space with a serial protocol, is not emulated.
 
+use crate::state::{StateReader, StateWriter};
+use std::io;
+
 const SRAM_SIZE: usize = 32 * 1024;
 const FLASH_64K: usize = 64 * 1024;
 const FLASH_128K: usize = 128 * 1024;
@@ -85,6 +88,67 @@ impl Savedata {
 
     /// Replaces the contents with a previously saved image. A short image is
     /// padded with erased bytes and a long one truncated.
+    /// Appends the chip's full state (contents and command sequence).
+    pub(crate) fn save_state(&self, writer: &mut StateWriter) {
+        writer.u8(match self.kind {
+            SaveKind::Sram => 0,
+            SaveKind::Flash64 => 1,
+            SaveKind::Flash128 => 2,
+            SaveKind::Eeprom => 3,
+        });
+        writer.sized(&self.data);
+        writer.u8(match self.sequence {
+            Sequence::Idle => 0,
+            Sequence::Unlocked1 => 1,
+            Sequence::Unlocked2 => 2,
+        });
+        writer.bool(self.identify);
+        writer.bool(self.erase_armed);
+        writer.bool(self.program_armed);
+        writer.bool(self.bank_switch_armed);
+        writer.u32(self.bank as u32);
+    }
+
+    /// Restores a state written by [`Self::save_state`]. The chip type must
+    /// match the ROM's. The result is marked dirty so the battery save file
+    /// follows the restored contents.
+    pub(crate) fn load_state(&mut self, reader: &mut StateReader) -> io::Result<()> {
+        let invalid =
+            |message: &str| io::Error::new(io::ErrorKind::InvalidData, message.to_owned());
+        let kind = match reader.u8()? {
+            0 => SaveKind::Sram,
+            1 => SaveKind::Flash64,
+            2 => SaveKind::Flash128,
+            3 => SaveKind::Eeprom,
+            _ => return Err(invalid("save state holds an unknown backup type")),
+        };
+        if kind != self.kind {
+            return Err(invalid("save state was made with a different backup type"));
+        }
+        let data = reader.sized(self.data.len())?;
+        if data.len() != self.data.len() {
+            return Err(invalid("save state holds a backup image of the wrong size"));
+        }
+        self.data.copy_from_slice(data);
+        self.sequence = match reader.u8()? {
+            0 => Sequence::Idle,
+            1 => Sequence::Unlocked1,
+            2 => Sequence::Unlocked2,
+            _ => return Err(invalid("save state holds an invalid flash sequence")),
+        };
+        self.identify = reader.bool()?;
+        self.erase_armed = reader.bool()?;
+        self.program_armed = reader.bool()?;
+        self.bank_switch_armed = reader.bool()?;
+        let bank = reader.u32()? as usize;
+        if bank > 1 {
+            return Err(invalid("save state holds an invalid flash bank"));
+        }
+        self.bank = bank;
+        self.dirty = true;
+        Ok(())
+    }
+
     pub fn load(&mut self, image: &[u8]) {
         let length = self.data.len().min(image.len());
         self.data.fill(0xFF);

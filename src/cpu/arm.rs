@@ -850,6 +850,7 @@ impl Cpu {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_arm_multiply(
         &mut self,
         accumulate: bool,
@@ -879,6 +880,7 @@ impl Cpu {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_arm_multiply_long(
         &mut self,
         signed: bool,
@@ -1151,6 +1153,7 @@ impl Cpu {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn execute_arm_data_processing(
         &mut self,
         opcode: u8,

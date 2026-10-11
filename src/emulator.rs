@@ -4,6 +4,7 @@ use crate::ppu::{Ppu, SCREEN_HEIGHT};
 use std::io;
 
 mod idle;
+mod state;
 use idle::IdleLoopDetector;
 
 const THUMB_STATE: u32 = 1 << 5;
@@ -83,11 +84,11 @@ impl Emulator {
 
         // The BIOS hooks (SWI vector, IRQ return stub) live in the first
         // 0x200 bytes; skip the call everywhere else.
-        if self.cpu.registers[15] < 0x200 {
-            if let Some(cycles) = self.cpu.step_bios_hle(&mut self.memory)? {
-                self.idle.reset();
-                return Ok(cycles);
-            }
+        if self.cpu.registers[15] < 0x200
+            && let Some(cycles) = self.cpu.step_bios_hle(&mut self.memory)?
+        {
+            self.idle.reset();
+            return Ok(cycles);
         }
 
         let pc_before = self.cpu.registers[15];

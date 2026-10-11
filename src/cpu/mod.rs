@@ -1,6 +1,7 @@
 mod alu;
 mod arm;
 mod bios;
+mod state;
 #[cfg(test)]
 mod tests;
 mod thumb;

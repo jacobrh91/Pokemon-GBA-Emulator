@@ -65,10 +65,10 @@ impl Windows {
         }
         // WIN0 beats WIN1, which beats the OBJ window, which beats "outside".
         for (span, layers) in self.spans.iter().zip(self.inside) {
-            if let Some((left, right)) = span {
-                if (*left..*right).contains(&x) {
-                    return layers;
-                }
+            if let Some((left, right)) = span
+                && (*left..*right).contains(&x)
+            {
+                return layers;
             }
         }
         if self.object_window_enabled && in_object_window {

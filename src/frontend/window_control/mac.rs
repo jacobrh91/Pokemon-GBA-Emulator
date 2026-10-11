@@ -31,6 +31,18 @@ fn selector(name: &CStr) -> *mut c_void {
     unsafe { sel_registerName(name.as_ptr()) }
 }
 
+/// The window's content area (below the title bar) from `contentLayoutRect`.
+pub fn content_size(window: &Window) -> Option<(f32, f32)> {
+    let object = ns_window(window);
+    if object.is_null() {
+        return None;
+    }
+    // Safety: `contentLayoutRect` takes no arguments and returns an NSRect;
+    // `object` is minifb's live NSWindow, used from the main thread.
+    let rect = unsafe { send_rect(object, c"contentLayoutRect") };
+    (rect.width > 0.0 && rect.height > 0.0).then_some((rect.width as f32, rect.height as f32))
+}
+
 pub fn left_button_down() -> bool {
     // Safety: `+[NSEvent pressedMouseButtons]` takes no arguments and
     // returns an NSUInteger bit mask (bit 0 is the left button).

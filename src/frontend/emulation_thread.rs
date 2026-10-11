@@ -5,11 +5,11 @@
 use super::audio_output::AudioSink;
 use gba_emulator::apu::SAMPLE_RATE;
 use gba_emulator::emulator::Emulator;
-use gba_emulator::library;
+use gba_emulator::game_library;
 use gba_emulator::ppu::{Pixel, SCREEN_HEIGHT, SCREEN_WIDTH};
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,13 @@ fn speed_factor(frames: u32, elapsed: Duration) -> f32 {
     (f64::from(frames) / elapsed.as_secs_f64() / GBA_FRAMES_PER_SECOND) as f32
 }
 
+/// [`Shared::state_request`] values.
+pub(super) const STATE_SAVE: u8 = 1;
+pub(super) const STATE_LOAD: u8 = 2;
+/// Low bits of [`Shared::state_notice`].
+pub(super) const STATE_SAVED: u32 = 1;
+pub(super) const STATE_LOADED: u32 = 2;
+
 /// State shared between the UI thread and the emulation thread.
 pub(super) struct Shared {
     pub(super) buttons: AtomicU16,
@@ -53,6 +60,13 @@ pub(super) struct Shared {
     pub(super) restart: AtomicBool,
     /// Number of restarts performed so far.
     pub(super) restarts: AtomicU32,
+    /// Set by the UI to ask for a save state operation ([`STATE_SAVE`] or
+    /// [`STATE_LOAD`]); cleared by the emulation thread.
+    pub(super) state_request: AtomicU8,
+    /// The last completed state operation as `count << 2 | kind`
+    /// ([`STATE_SAVED`] or [`STATE_LOADED`]); the count lets the UI notice a
+    /// repeat of the same operation.
+    pub(super) state_notice: AtomicU32,
     /// Number of frames the emulation thread has published.
     pub(super) frames: AtomicU64,
     /// Latest finished frame as `0x00RRGGBB` pixels.
@@ -70,6 +84,8 @@ impl Shared {
             fast_forward_target: AtomicU32::new(0),
             restart: AtomicBool::new(false),
             restarts: AtomicU32::new(0),
+            state_request: AtomicU8::new(0),
+            state_notice: AtomicU32::new(0),
             frames: AtomicU64::new(0),
             frame: Mutex::new(vec![0; SCREEN_WIDTH * SCREEN_HEIGHT]),
             error: Mutex::new(None),
@@ -83,7 +99,9 @@ pub(super) fn emulation_loop(
     sink: Option<AudioSink>,
     shared: &Shared,
     save_path: &Path,
+    state_path: &Path,
 ) {
+    let mut state_operations = 0_u32;
     let mut next_frame = Instant::now();
     let mut last_save_check = Instant::now();
     let mut last_publish = Instant::now();
@@ -110,6 +128,33 @@ pub(super) fn emulation_loop(
             shared.restarts.fetch_add(1, Ordering::Relaxed);
             speed_window_start = Instant::now();
             speed_window_frames = 0;
+        }
+
+        // Save states are taken and restored between frames, when the audio
+        // has been collected and no scanline is half drawn.
+        match shared.state_request.swap(0, Ordering::Relaxed) {
+            STATE_SAVE => {
+                if save_state(&emulator, state_path) {
+                    state_operations += 1;
+                    shared
+                        .state_notice
+                        .store(state_operations << 2 | STATE_SAVED, Ordering::Relaxed);
+                }
+            }
+            STATE_LOAD => {
+                if load_state(&mut emulator, state_path) {
+                    if let Some(sink) = &sink {
+                        sink.clear();
+                    }
+                    speed_window_start = Instant::now();
+                    speed_window_frames = 0;
+                    state_operations += 1;
+                    shared
+                        .state_notice
+                        .store(state_operations << 2 | STATE_LOADED, Ordering::Relaxed);
+                }
+            }
+            _ => {}
         }
 
         emulator.set_buttons(shared.buttons.load(Ordering::Relaxed));
@@ -221,12 +266,55 @@ pub(super) fn emulation_loop(
     flush_save(&mut emulator, save_path);
 }
 
+/// Writes a save state beside the ROM. Returns whether it was written.
+fn save_state(emulator: &Emulator, state_path: &Path) -> bool {
+    match game_library::write_save(state_path, &emulator.save_state()) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "could not write save state {}: {error}",
+                state_path.display()
+            );
+            false
+        }
+    }
+}
+
+/// Restores the save state beside the ROM. Returns whether the console was
+/// restored; on any failure the running game is left as it was.
+fn load_state(emulator: &mut Emulator, state_path: &Path) -> bool {
+    let bytes = match std::fs::read(state_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("no save state yet ({})", state_path.display());
+            return false;
+        }
+        Err(error) => {
+            eprintln!(
+                "could not read save state {}: {error}",
+                state_path.display()
+            );
+            return false;
+        }
+    };
+    match emulator.load_state(&bytes) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "could not load save state {}: {error}",
+                state_path.display()
+            );
+            false
+        }
+    }
+}
+
 /// Writes the backup image if the game changed it.
 fn flush_save(emulator: &mut Emulator, save_path: &Path) {
-    if let Some(image) = emulator.take_save_if_changed() {
-        if let Err(error) = library::write_save(save_path, &image) {
-            eprintln!("could not write save {}: {error}", save_path.display());
-        }
+    if let Some(image) = emulator.take_save_if_changed()
+        && let Err(error) = game_library::write_save(save_path, &image)
+    {
+        eprintln!("could not write save {}: {error}", save_path.display());
     }
 }
 
@@ -274,6 +362,7 @@ mod tests {
                     sink,
                     &shared,
                     Path::new("/nonexistent-dir/never-written.sav"),
+                    Path::new("/nonexistent-dir/never-written.state"),
                 )
             })
         };
@@ -322,7 +411,13 @@ mod tests {
         let worker = {
             let shared = Arc::clone(&shared);
             thread::spawn(move || {
-                emulation_loop(emulator, None, &shared, Path::new("/nonexistent-dir/x.sav"))
+                emulation_loop(
+                    emulator,
+                    None,
+                    &shared,
+                    Path::new("/nonexistent-dir/x.sav"),
+                    Path::new("/nonexistent-dir/x.state"),
+                )
             })
         };
         thread::sleep(Duration::from_millis(800));
@@ -332,6 +427,62 @@ mod tests {
         // Wall-clock paced at one console frame per frame: about real time.
         let measured = f32::from_bits(shared.speed.load(Ordering::Relaxed));
         assert!((0.5..=1.6).contains(&measured), "measured {measured}x");
+    }
+
+    #[test]
+    fn state_requests_write_and_restore_a_state_and_report_each_once() {
+        let path = spin_rom();
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        emulator.initialize_gba_startup(ROM_START).unwrap();
+        let state_path = std::env::temp_dir().join(format!(
+            "gba-frontend-state-test-{}.state",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&state_path);
+
+        let shared = Arc::new(Shared::new());
+        let worker = {
+            let shared = Arc::clone(&shared);
+            let state_path = state_path.clone();
+            thread::spawn(move || {
+                emulation_loop(
+                    emulator,
+                    None,
+                    &shared,
+                    Path::new("/nonexistent-dir/x.sav"),
+                    &state_path,
+                )
+            })
+        };
+        let notice = |shared: &Shared| shared.state_notice.load(Ordering::Relaxed);
+        let wait_for = |shared: &Shared, count: u32, kind: u32| {
+            for _ in 0..200 {
+                if notice(shared) == (count << 2 | kind) {
+                    return true;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            false
+        };
+
+        // Restoring with no state yet reports nothing and changes nothing.
+        shared.state_request.store(STATE_LOAD, Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(120));
+        assert_eq!(notice(&shared), 0);
+        assert!(!state_path.exists());
+
+        shared.state_request.store(STATE_SAVE, Ordering::Relaxed);
+        assert!(wait_for(&shared, 1, STATE_SAVED), "save was not reported");
+        assert!(state_path.exists());
+
+        shared.state_request.store(STATE_LOAD, Ordering::Relaxed);
+        assert!(wait_for(&shared, 2, STATE_LOADED), "load was not reported");
+
+        shared.running.store(false, Ordering::Relaxed);
+        worker.join().unwrap();
+        assert!(shared.error.lock().unwrap().is_none());
+        std::fs::remove_file(state_path).unwrap();
     }
 
     #[test]
@@ -353,6 +504,7 @@ mod tests {
                     Some(sink),
                     &shared,
                     Path::new("/nonexistent-dir/x.sav"),
+                    Path::new("/nonexistent-dir/x.state"),
                 )
             })
         };

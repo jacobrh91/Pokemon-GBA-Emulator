@@ -5,10 +5,11 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 usage:
   gba_emulator ROM_PATH | INSTALLED_NAME     run a ROM file or an installed ROM
-  gba_emulator install ROM_PATH [--force]    copy a ROM into the library
+  gba_emulator install ROM_PATH [--force]    copy a ROM into the game library
   gba_emulator list                          show installed ROMs
 
-The library lives in your user data directory (override with GBA_EMULATOR_LIBRARY).
+The game library lives in your user data directory (override with
+GBA_EMULATOR_LIBRARY).
 Each ROM gets its own directory containing the ROM and a `saves/` folder.";
 
 /// What the command line asked for.

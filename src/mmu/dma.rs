@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::mmu::registers::{DMA_BASE, FIFO_A, INTERRUPT_REQUEST};
+use crate::state::{StateReader, StateWriter};
 
 const CHANNEL_STRIDE: usize = 12;
 /// Offset of the high byte of CNT_H, whose write may enable the channel.
@@ -26,6 +27,23 @@ pub(super) struct DmaChannel {
     source: u32,
     destination: u32,
     count: u32,
+}
+
+impl DmaChannel {
+    pub(super) fn save_state(&self, writer: &mut StateWriter) {
+        writer.bool(self.active);
+        writer.u32(self.source);
+        writer.u32(self.destination);
+        writer.u32(self.count);
+    }
+
+    pub(super) fn load_state(&mut self, reader: &mut StateReader) -> io::Result<()> {
+        self.active = reader.bool()?;
+        self.source = reader.u32()?;
+        self.destination = reader.u32()?;
+        self.count = reader.u32()?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

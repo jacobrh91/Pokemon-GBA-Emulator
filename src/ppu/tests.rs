@@ -485,7 +485,7 @@ fn affine_sprites_rotate_and_double_size_expands_the_box() {
     }
     // Sprite 0: affine, group 0, at (0,0). Sprite 8 uses group 1 at (40,0).
     set_sprite(&mut memory, 0, 1 << 8, 0, 0);
-    set_sprite(&mut memory, 8, (1 << 8) | 0, 40 | (1 << 9), 0);
+    set_sprite(&mut memory, 8, 1 << 8, 40 | (1 << 9), 0);
 
     let mut ppu = Ppu::default();
     let registers = registers_with(OBJ_ON_1D);
@@ -624,7 +624,7 @@ fn brightness_decrease_darkens_only_selected_first_targets() {
     let registers = blend_registers(0x0001 | (3 << 6), 0, 8);
     let mut ppu = Ppu::default();
     ppu.render_scanline(0, &registers, &memory);
-    assert_eq!(color_at(&ppu, 0, 0), expand([31 - (31 * 8 >> 4), 0, 0]));
+    assert_eq!(color_at(&ppu, 0, 0), expand([31 - ((31 * 8) >> 4), 0, 0]));
 
     // BG0 not selected: unchanged.
     let registers = blend_registers(0x0002 | (3 << 6), 0, 8);
@@ -667,8 +667,8 @@ fn window_effect_bit_disables_blending_inside_the_window() {
     two_background_scene(&mut memory);
     let mut registers = blend_registers(0x0001 | (3 << 6), 0, 16);
     registers[1] = 0x23; // BG0 + BG1 + WIN0
-    registers[0x40..0x42].copy_from_slice(&((0u16 << 8) | 100).to_le_bytes());
-    registers[0x44..0x46].copy_from_slice(&((0u16 << 8) | 160).to_le_bytes());
+    registers[0x40..0x42].copy_from_slice(&100u16.to_le_bytes());
+    registers[0x44..0x46].copy_from_slice(&160u16.to_le_bytes());
     registers[0x48] = 0x03; // inside WIN0: BG0 + BG1, effects off
     registers[0x4A] = 0x23; // outside: BG0 + BG1 + effects on
 

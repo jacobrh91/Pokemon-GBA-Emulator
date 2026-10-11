@@ -1,6 +1,7 @@
 mod background;
 mod blend;
 mod sprites;
+mod state;
 mod windows;
 
 use crate::mmu::MemoryBus;
@@ -75,10 +76,10 @@ impl Ppu {
         if y >= SCREEN_HEIGHT {
             return;
         }
-        for background in 0..2 {
+        for (background, &reload) in affine_reload.iter().enumerate() {
             let source = affine_reference_registers(registers, background);
             let previous = self.affine_loaded_from[background];
-            if y == 0 || affine_reload[background] || previous != Some(source) {
+            if y == 0 || reload || previous != Some(source) {
                 self.affine_reference[background] = source;
                 if previous.is_none() && y > 0 {
                     // First line seen is not line 0 (random access): behave as
@@ -184,16 +185,16 @@ impl Ppu {
             // priority, then OBJ before BG0..3 on ties; the backdrop is last.
             let mut layers: [Option<LayerPixel>; 6] = [None; 6];
             let mut count = 0;
-            if visible_layers & OBJ_LAYER != 0 {
-                if let Some(sprite) = self.sprites.pixels[x] {
-                    layers[count] = Some(LayerPixel {
-                        sort_key: sprite.priority << 3,
-                        layer: OBJ_LAYER,
-                        color: sprite.color,
-                        semi_transparent: sprite.semi_transparent,
-                    });
-                    count += 1;
-                }
+            if visible_layers & OBJ_LAYER != 0
+                && let Some(sprite) = self.sprites.pixels[x]
+            {
+                layers[count] = Some(LayerPixel {
+                    sort_key: sprite.priority << 3,
+                    layer: OBJ_LAYER,
+                    color: sprite.color,
+                    semi_transparent: sprite.semi_transparent,
+                });
+                count += 1;
             }
             for layer in &enabled_backgrounds {
                 if visible_layers & (1 << layer.background) == 0 {
@@ -265,8 +266,6 @@ fn line_reference(
         pc: signed(4),
     }
 }
-
-/// BG2 matrix/reference registers start here; BG3's are 0x10 further.
 
 /// Reads the 28-bit signed reference point registers (X, Y) of BG2/BG3.
 fn affine_reference_registers(registers: &[u8], background: usize) -> [i32; 2] {
