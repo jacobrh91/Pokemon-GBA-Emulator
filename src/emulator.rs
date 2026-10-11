@@ -1,4 +1,5 @@
 use crate::cheats::Cheats;
+use crate::cheats::firered::shiny;
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -47,6 +48,12 @@ pub struct Emulator {
     /// Where the 100% catch rate cheat is applied while it is on, or
     /// `NO_HOOK`.
     catch_hook: u32,
+    /// Bus address in `CreateBoxMon` where the personality value and OT ID are
+    /// both known, found by a signature scan (see [`shiny`]); `None` if not
+    /// recognised.
+    shiny_point: Option<u32>,
+    /// Where the all-shiny cheat is applied while it is on, or `NO_HOOK`.
+    shiny_hook: u32,
     /// Where the wild-encounter override is applied while it is active, or
     /// `NO_HOOK`, and the species / level written there (`NO_VALUE` to keep
     /// the game's).
@@ -73,6 +80,7 @@ impl Emulator {
         let CheatScan {
             create_wild_mon,
             catch_check,
+            shiny_point,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         Ok(Self {
@@ -89,6 +97,8 @@ impl Emulator {
             create_wild_mon,
             catch_check,
             catch_hook: NO_HOOK,
+            shiny_point,
+            shiny_hook: NO_HOOK,
             cheat_options: CheatOptions::default(),
             wild_species_hook: NO_HOOK,
             wild_species: NO_VALUE,
@@ -157,6 +167,11 @@ impl Emulator {
         if pc_before == self.catch_hook {
             self.cpu.registers[6] = CATCH_ALWAYS_ODDS;
         }
+        // All Pokémon shiny: while a Pokémon is being built, make its
+        // personality value shiny for its OT ID.
+        if pc_before == self.shiny_hook {
+            self.make_new_pokemon_shiny();
+        }
         // Wild-encounter override: replace the species and/or level
         // arguments of the function that builds every wild encounter.
         if pc_before == self.wild_species_hook {
@@ -196,6 +211,33 @@ impl Emulator {
             cycles += self.skip_idle_iterations();
         }
         Ok(cycles)
+    }
+
+    /// At the hook inside `CreateBoxMon` (see [`shiny`]): rewrites the
+    /// personality value, in the local the function goes on to read and in the
+    /// `BoxPokemon` it was just stored in, so that the Pokémon is shiny for its
+    /// OT ID. Unown is left alone. A memory fault leaves everything unchanged.
+    fn make_new_pokemon_shiny(&mut self) {
+        let sp = self.cpu.registers[13];
+        let box_mon = self.cpu.registers[shiny::BOX_MON_REGISTER];
+        let memory = &mut self.memory;
+        let Ok(species) = memory.read_u16(sp.wrapping_add(shiny::SPECIES_OFFSET)) else {
+            return;
+        };
+        let (Ok(personality), Ok(ot_id)) = (
+            memory.read_u32(sp.wrapping_add(shiny::PERSONALITY_OFFSET)),
+            memory.read_u32(sp.wrapping_add(shiny::OT_ID_OFFSET)),
+        ) else {
+            return;
+        };
+        if species == shiny::UNOWN {
+            return;
+        }
+        let shiny = shiny::shiny_personality(personality, ot_id);
+        if shiny != personality {
+            let _ = memory.write_u32(sp.wrapping_add(shiny::PERSONALITY_OFFSET), shiny);
+            let _ = memory.write_u32(box_mon, shiny);
+        }
     }
 
     /// Enables or disables idle-loop skipping (on by default). Skipping is
@@ -339,6 +381,11 @@ impl Emulator {
             Some(address) if self.cheat_options.catch_always => address,
             _ => NO_HOOK,
         };
+        // The all-Pokémon-are-shiny row: hook where a Pokémon is being built.
+        self.shiny_hook = match self.shiny_point {
+            Some(address) if self.cheat_options.shiny => address,
+            _ => NO_HOOK,
+        };
         // The wild-encounter override, driven by its row of the menu.
         self.wild_species_hook = NO_HOOK;
         self.wild_species = NO_VALUE;
@@ -374,6 +421,7 @@ impl Emulator {
             rom: crate::cheats::scan::RomFingerprint::of(&self.memory.rom),
             create_wild_mon: self.create_wild_mon,
             catch_check: self.catch_check,
+            shiny_point: self.shiny_point,
         }
     }
 
@@ -392,6 +440,12 @@ impl Emulator {
     /// when it is not a FireRed build whose catch check can be found.
     pub fn catch_check_address(&self) -> Option<u32> {
         self.catch_check
+    }
+
+    /// The bus address the all-shiny cheat hooks in this ROM, or `None` when
+    /// it is not a FireRed build whose `CreateBoxMon` can be found.
+    pub fn shiny_hook_address(&self) -> Option<u32> {
+        self.shiny_point
     }
 
     /// Whether the wild-species override can work with this ROM.

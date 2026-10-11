@@ -662,7 +662,10 @@ fn only_options_that_are_not_live_are_tagged_soon() {
         .iter()
         .filter(|option| !CheatOptions::is_live(**option))
         .count();
-    assert_eq!(expected_tags, 4, "the catch rate row is live and untagged");
+    assert_eq!(
+        expected_tags, 3,
+        "the catch rate and shiny rows are live and untagged"
+    );
 
     // One tag is exactly the pixels of the text "SOON".
     let mut single = vec![0u32; 200 * 40];
@@ -679,7 +682,7 @@ fn only_options_that_are_not_live_are_tagged_soon() {
 }
 
 #[test]
-fn the_catch_rate_row_is_untagged_and_the_still_inactive_rows_are_tagged() {
+fn the_live_rows_are_untagged_and_the_still_inactive_rows_are_tagged() {
     // Look at the band of pixels at the right edge of each row for the SOON
     // colour.
     let layout = layout();
@@ -695,7 +698,7 @@ fn the_catch_rate_row_is_untagged_and_the_still_inactive_rows_are_tagged() {
     assert!(tagged(layout.money));
     assert!(!tagged(layout.catch), "100% catch rate works now");
     assert!(tagged(layout.exp_boost));
-    assert!(tagged(layout.shiny));
+    assert!(!tagged(layout.shiny), "shiny works now");
 }
 
 #[test]

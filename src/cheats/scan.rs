@@ -7,7 +7,7 @@
 //! "Not found" is remembered too, so a ROM that is not FireRed is not scanned
 //! again either.
 
-use super::firered::{catch_rate, wild_species};
+use super::firered::{catch_rate, shiny, wild_species};
 
 /// Identifies a ROM image: `<length>-<hash>`, both in hex.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,8 @@ pub struct CheatScan {
     pub create_wild_mon: Option<u32>,
     /// The catch check's compare instruction (see [`catch_rate`]).
     pub catch_check: Option<u32>,
+    /// Where `CreateBoxMon` has the personality and OT ID (see [`shiny`]).
+    pub shiny_point: Option<u32>,
 }
 
 impl CheatScan {
@@ -52,6 +54,7 @@ impl CheatScan {
             rom: RomFingerprint::of(rom),
             create_wild_mon: wild_species::find(rom),
             catch_check: catch_rate::find(rom),
+            shiny_point: shiny::find(rom),
         }
     }
 
@@ -87,6 +90,7 @@ mod tests {
             rom: RomFingerprint::of(&rom),
             create_wild_mon: Some(0x0800_1234),
             catch_check: None,
+            shiny_point: None,
         };
         assert_eq!(CheatScan::for_rom(&rom, Some(&recorded)), recorded);
         let mut other = rom.clone();

@@ -95,7 +95,8 @@ impl Settings {
         let (mut legacy_wild, mut legacy_opponents, mut target_seen) = (false, false, false);
         // The scan is kept only when its fingerprint and both addresses (an
         // address or `none`) are all present and well formed.
-        let (mut scan_rom, mut scan_wild, mut scan_catch) = (None, None, None);
+        let (mut scan_rom, mut scan_wild, mut scan_catch, mut scan_shiny) =
+            (None, None, None, None);
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
             let Some((key, value)) = line.split_once('=') else {
@@ -163,6 +164,7 @@ impl Settings {
                 "cheat_scan_rom" => scan_rom = RomFingerprint::parse(value),
                 "cheat_scan_create_wild_mon" => scan_wild = parse_address(value),
                 "cheat_scan_catch_check" => scan_catch = parse_address(value),
+                "cheat_scan_shiny" => scan_shiny = parse_address(value),
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -175,13 +177,14 @@ impl Settings {
                 _ => {}
             }
         }
-        if let (Some(rom), Some(create_wild_mon), Some(catch_check)) =
-            (scan_rom, scan_wild, scan_catch)
+        if let (Some(rom), Some(create_wild_mon), Some(catch_check), Some(shiny_point)) =
+            (scan_rom, scan_wild, scan_catch, scan_shiny)
         {
             settings.cheat_scan = Some(CheatScan {
                 rom,
                 create_wild_mon,
                 catch_check,
+                shiny_point,
             });
         }
         let options = &mut settings.cheat_options;
@@ -277,6 +280,7 @@ impl Settings {
             for (key, address) in [
                 ("cheat_scan_create_wild_mon", scan.create_wild_mon),
                 ("cheat_scan_catch_check", scan.catch_check),
+                ("cheat_scan_shiny", scan.shiny_point),
             ] {
                 match address {
                     Some(address) => text.push_str(&format!("{key} = {address:#010X}\n")),
@@ -332,6 +336,7 @@ mod tests {
                 rom: RomFingerprint::of(&[1, 2, 3]),
                 create_wild_mon: Some(0x0808_29FC),
                 catch_check: None,
+                shiny_point: Some(0x0803_DB92),
             }),
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
@@ -538,13 +543,13 @@ window_height = 50
     fn an_incomplete_or_malformed_scan_is_dropped() {
         let rom = RomFingerprint::of(&[9]);
         let full = format!(
-            "cheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\n",
+            "cheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\n",
             rom.as_str()
         );
         let scan = Settings::parse(&full).cheat_scan.unwrap();
         assert_eq!(scan.create_wild_mon, Some(0x0800_1000));
         assert_eq!(scan.catch_check, None);
-        for missing in 0..3 {
+        for missing in 0..4 {
             let partial: String = full
                 .lines()
                 .enumerate()

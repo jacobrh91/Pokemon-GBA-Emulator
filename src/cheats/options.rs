@@ -64,7 +64,7 @@ impl PerfectTarget {
 /// so that a row can be turned off without losing what was chosen in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CheatOptions {
-    /// Every Pokémon is shiny. Not active yet.
+    /// Every Pokémon is shiny (FireRed).
     pub shiny: bool,
     /// Switch of the wild-encounter row. While off, `wild_species` and
     /// `wild_level` are remembered but do nothing.
@@ -112,7 +112,10 @@ impl CheatOptions {
     pub fn is_live(option: CheatOption) -> bool {
         matches!(
             option,
-            CheatOption::WildSpecies | CheatOption::WildLevel | CheatOption::CatchAlways
+            CheatOption::WildSpecies
+                | CheatOption::WildLevel
+                | CheatOption::CatchAlways
+                | CheatOption::Shiny
         )
     }
 
@@ -163,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_wild_and_catch_options_are_live_so_far() {
+    fn only_the_wild_catch_and_shiny_options_are_live_so_far() {
         use CheatOption::*;
         let live: Vec<_> = [
             Shiny,
@@ -177,7 +180,7 @@ mod tests {
         .into_iter()
         .filter(|option| CheatOptions::is_live(*option))
         .collect();
-        assert_eq!(live, [WildSpecies, WildLevel, CatchAlways]);
+        assert_eq!(live, [Shiny, WildSpecies, WildLevel, CatchAlways]);
     }
 
     #[test]

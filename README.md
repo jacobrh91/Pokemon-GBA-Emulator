@@ -63,7 +63,7 @@ game is played.
 | Infinite money | | not active yet (tagged SOON) |
 | 100% catch rate | | **active** (FireRed) |
 | All experience is boosted | | not active yet (tagged SOON); the size of the boost is not decided |
-| All Pokémon are shiny | | not active yet (tagged SOON) |
+| All Pokémon are shiny | | **active** (FireRed) |
 
 - **A row that is switched off keeps its choices**, shown dimmed, so you can
   turn it back on without choosing again.
@@ -128,6 +128,24 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 ("Gotcha! MEWTWO was caught!") with it on, on v1.0, v1.1 and the Japanese build.
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
+
+### All Pokémon are shiny (Pokémon FireRed)
+
+In generation III a Pokémon is shiny when `OT ID high ^ OT ID low ^ PID high ^
+PID low` is below 8; shininess is not stored, it follows from the personality
+value (PID) and the original trainer's ID. `CreateBoxMon`, which builds every
+Pokémon, draws the PID and picks the OT ID; with the row switched on the
+emulator stops just after both are known and rewrites the PID so the sum is
+below 8. The OT ID is left alone (the player's Pokémon stay the player's), and
+the new PID keeps the low byte (gender, ability slot) and `PID % 25` (nature),
+so only the colours change. Unown is skipped: its letter is made of the PID's
+low bits. It applies to every Pokémon the game creates from then on (wild,
+trainers', gifts, eggs), not to ones already in the party or boxes. The place
+is found by a signature scan like the others (`src/cheats/firered/shiny.rs`).
+
+From the save states in the grass, the first wild Pokémon is shiny with the
+row on, with the same OT ID, gender and nature as without it, on v1.0, v1.1 and
+the Japanese build (`tests/shiny_live.rs`).
 
 ### Wild species override (Pokémon FireRed)
 
@@ -269,6 +287,7 @@ src/
     firered/         Built-in FireRed cheats found by signature scan:
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
+      shiny.rs         all Pokémon shiny (the PID, inside the routine that builds a Pokémon)
     options.rs       The cheat menu's options
     species.rs       Names of the 251 original species
   state.rs     Binary codec for save states (each component saves its own fields)

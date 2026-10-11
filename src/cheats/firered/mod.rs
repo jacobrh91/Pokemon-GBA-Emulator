@@ -4,12 +4,14 @@
 //! instruction bytes (a *signature scan*) and the emulator changes a register
 //! when the CPU reaches that address.
 //!
-//! The two mechanisms are kept apart:
+//! Three mechanisms are kept apart:
 //!
 //! * [`wild_species`]: replaces the arguments of a function *at its entry*
 //!   (the species and level of every wild encounter).
 //! * [`catch_rate`]: replaces a value *in the middle of a routine* (the ball's
 //!   catch odds, just before the game tests them).
+//! * [`shiny`]: replaces a value *in the middle of a routine* of the code that
+//!   builds every Pokémon (its personality value, so that it is shiny).
 //!
 //! This module holds what they share: recognising a FireRed cartridge, the
 //! scan itself, and the table of builds that were checked.
@@ -45,6 +47,10 @@
 //! | FireRed v1.1 (US) | `BPRE` | 1 | `84EE4776` | `0x08082A10` | `0x0802D6D0` | encounter: Pidgey → Dratini; catch: Lv100 Mewtwo caught first throw |
 //! | FireRed (Japan)   | `BPRJ` | 0 | `3B2056E9` | `0x080825E8` | `0x0802CE94` | encounter: Rattata → Dratini; catch: Lv100 Mewtwo caught first throw |
 //!
+//! The shiny cheat's hook (inside `CreateBoxMon`) is at `0x0803DB92` (v1.0),
+//! `0x0803DBA6` (v1.1) and `0x0803D2FE` (Japan); each was checked live from a
+//! save state in the grass (`tests/shiny_live.rs`).
+//!
 //! The enemy party is not at the same RAM address in every build (it is
 //! `0x0202402C` in the English builds and `0x02023F8C` in the Japanese one),
 //! which matters for anything that reads the species back out of RAM, but not
@@ -64,6 +70,7 @@
 //! its own signature.
 
 pub mod catch_rate;
+pub mod shiny;
 pub mod wild_species;
 
 /// Where the ROM appears on the bus.
