@@ -1,8 +1,10 @@
 //! Geometry of the dock's controls for a given window size.
 
-use crate::frontend::draw::{GLYPH_HEIGHT, Rect, TEXT_SCALE};
+use crate::frontend::draw::{GLYPH_ADVANCE, GLYPH_HEIGHT, Rect, TEXT_SCALE};
 
-pub(super) const DOCK_WIDTH: i32 = 663;
+/// The CHEATS button's text ("CHEATS" is six glyphs) plus padding.
+pub(super) const CHEATS_BUTTON_WIDTH: i32 = 6 * GLYPH_ADVANCE - TEXT_SCALE + 28;
+pub(super) const DOCK_WIDTH: i32 = 663 + CHEATS_BUTTON_WIDTH + 29;
 pub(super) const RESTART_SIZE: i32 = 38;
 pub(super) const FULLSCREEN_SIZE: i32 = 38;
 pub(super) const POWER_SIZE: i32 = 38;
@@ -28,6 +30,10 @@ pub(super) struct Layout {
     /// Separator between the volume and speed sections.
     pub(super) divider_x: i32,
     pub(super) speed_buttons: [Rect; 4],
+    /// The button that opens the cheat menu, at the right end.
+    pub(super) cheats: Rect,
+    /// Separator between the speed buttons and the cheat button.
+    pub(super) cheats_divider_x: i32,
     /// Separator after the power and restart buttons.
     pub(super) restart_divider_x: i32,
     pub(super) restart: Rect,
@@ -44,7 +50,15 @@ impl Layout {
             height: DOCK_HEIGHT,
         };
         let center_y = dock.y + DOCK_HEIGHT / 2;
-        // Left to right: power, restart, divider, then volume.
+        // Left to right: power, restart, full screen, divider, volume,
+        // divider, speed, divider, then cheats.
+        let cheats = Rect {
+            x: dock.x + DOCK_WIDTH - DOCK_PADDING - CHEATS_BUTTON_WIDTH,
+            y: center_y - SPEED_BUTTON_HEIGHT / 2,
+            width: CHEATS_BUTTON_WIDTH,
+            height: SPEED_BUTTON_HEIGHT,
+        };
+        let cheats_divider_x = cheats.x - 13;
         let power = Rect {
             x: dock.x + DOCK_PADDING,
             y: center_y - POWER_SIZE / 2,
@@ -77,7 +91,7 @@ impl Layout {
             height: TRACK_HEIGHT,
         };
         let buttons_width = 4 * SPEED_BUTTON_WIDTH + 3 * SPEED_BUTTON_GAP;
-        let buttons_x = dock.x + DOCK_WIDTH - DOCK_PADDING - buttons_width;
+        let buttons_x = cheats_divider_x - 16 - buttons_width;
         let speed_buttons = std::array::from_fn(|index| Rect {
             x: buttons_x + index as i32 * (SPEED_BUTTON_WIDTH + SPEED_BUTTON_GAP),
             y: center_y - SPEED_BUTTON_HEIGHT / 2,
@@ -92,6 +106,8 @@ impl Layout {
             text_y: center_y - (GLYPH_HEIGHT * TEXT_SCALE) / 2,
             divider_x: buttons_x - 14,
             speed_buttons,
+            cheats,
+            cheats_divider_x,
             restart_divider_x,
             restart,
             fullscreen,

@@ -46,6 +46,119 @@ save-state randomness range. The file is
 ignored, and deleting it restores the defaults. Changes are written about once a
 second and at exit.
 
+## Cheat menu
+
+Press **Tab**, or click the **CHEATS** button at the right end of the dock, to
+open a menu of cheats above the dock. Every row has its own **checkbox at the
+left** that switches that cheat on and off; there is no global switch. The menu
+closes with Tab, the button, Escape, or a click anywhere else, and the choices
+apply immediately and are remembered in the settings file for the next time the
+game is played.
+
+| Row (checkbox at its left) | Other controls | Status |
+|---|---|---|
+| *n* codes from the cheats file (only when the file has codes) | | **active**; never remembered, so it starts off every session |
+| Wild Pokémon is *species* at level *n* | dropdown: ANY, then the 251 species; `-` / `+`, mouse wheel, `X` to clear for the level (empty keeps the game's) | **active** (FireRed) |
+| Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | not active yet (tagged SOON) |
+| Infinite money | | not active yet (tagged SOON) |
+| 100% catch rate | | not active yet (tagged SOON) |
+| All experience is boosted | | not active yet (tagged SOON); the size of the boost is not decided |
+| All Pokémon are shiny | | not active yet (tagged SOON) |
+
+- **A row that is switched off keeps its choices**, shown dimmed, so you can
+  turn it back on without choosing again.
+- **Choosing in a row switches it on**: picking a species or a level, or
+  choosing a different perfect-stats target, ticks the row's checkbox too, so a
+  choice is never silently inactive. Choosing the target that is already
+  selected changes nothing.
+- **The species list** scrolls with the mouse wheel or by pressing and dragging
+  its right edge. Species and level are independent: a species alone keeps the
+  area's level, and a level alone keeps the species.
+- **Wild encounters** are changed through the function hook described under
+  *Wild species override*, in the FireRed builds listed there; they need no
+  `.cheats` file.
+- **Rows tagged SOON** are stored and shown but do not change the game yet.
+
+## Cheats
+
+Put cheat codes in a text file beside the ROM, named `<ROM name>.cheats`, one
+CodeBreaker-format code (`XXXXXXXX YYYY`, 8 + 4 hex digits) per line; `#` starts
+a comment. They are read at startup and applied once per frame, so they keep
+winning against the game rewriting the value. At launch the terminal reports how
+many writes were loaded and any line that could not be used.
+
+| Code | Meaning |
+|---|---|
+| `3aaaaaaa 00vv` | write the byte `vv` to `aaaaaaa` |
+| `8aaaaaaa vvvv` | write the halfword `vvvv` to `aaaaaaa` (even address) |
+| `0000xxxx 000y` | master code 1, the game's identity (ignored) |
+| `1aaaaaaa yyyy` | master code 2, the hook: ROM offset `aaaaaaa` |
+
+On real hardware a CodeBreaker cartridge must get its code handler to run
+regularly, so its master code names a ROM address that the game executes every
+frame, where the cartridge hooks itself in, and the cheat writes happen from
+that point in the program. The emulator does the same: when a code of the form
+`1aaaaaaa yyyy` is present, the writes are performed each time execution reaches
+that address; without one they are performed once per frame. Writes are limited
+to RAM (`0x02......` EWRAM and `0x03......` IWRAM); any other line, including
+code types not listed above, is reported and skipped rather than guessed at.
+
+**The codes start off every session; tick the "codes from the cheats file" row
+of the cheat menu (Tab) to switch them on.** That row appears only when the file
+has codes, and is deliberately never remembered between sessions. Many codes do
+not poke data but patch routines of the game that sit in RAM, and those patches
+are only valid while the game has that routine loaded. Applied from the first
+frame, a patch like the popular wild-encounter code crashes the game during the
+intro; switched on after the game is up it runs normally. Use such cheats on
+demand, the way a cartridge's on/off menu did.
+
+### Wild species override (Pokémon FireRed)
+
+```text
+wild_species = Dratini
+```
+
+A built-in cheat that makes every wild encounter (grass, surfing, fishing, rock
+smash) the species you name. It is the wild-Pokémon row of the cheat menu; the
+line above, in the `.cheats` file, only **preselects the dropdown** (a name, a
+dex number from 1 to 251, or `0x93`) when no species was saved, and you tick the
+row's checkbox to use it. Encounter levels, personalities and everything else
+about the encounter are unchanged. Static encounters such as legendaries and
+Snorlax are not wild encounters in this sense and are left alone.
+
+How it works: while the row is on, whenever execution reaches the entry of the
+game's `CreateWildMon` function, the species argument register is replaced. It
+does not depend on the stack or RAM layout. The function's address differs
+between builds, so it is found when the ROM is opened by a **signature scan**:
+the function's first 16 bytes (a compiler prologue with no branch or pool
+operands, so identical in every build) are searched for in the ROM, and the
+override is used only if there is exactly one match in a `BPR?` (FireRed)
+cartridge. Otherwise it is ignored, with a message in the terminal. The full
+explanation is in `src/emulator/wild_species.rs`.
+
+| Build | Game code | Version | Function at | Checked |
+|---|---|---|---|---|
+| FireRed v1.0 (US) | `BPRE` | 0 | `0x080829FC` | live encounter |
+| FireRed v1.1 (US) | `BPRE` | 1 | `0x08082A10` | live encounter |
+| FireRed (Japan) | `BPRJ` | 0 | `0x080825E8` | live encounter |
+
+In a headless test from a real save standing in grass, every encounter on v1.0,
+v1.1 and the Japanese build was Dratini where the control runs gave Rattata or
+Pidgey, at the same levels and with the same personality values.
+
+**The cheats file belongs to one ROM file.** It is read from `<ROM file
+name>.cheats` beside the ROM, so each revision or language needs its own copy
+(`Pokemon Fire Red (J).cheats` for `Pokemon Fire Red (J).gba`). A ROM with no
+such file simply has no cheats, and the terminal prints no `cheats` line for it.
+
+**About the popular "wild Pokémon modifier" CodeBreaker codes** (`83007D4E xxxx`
+plus a master code): in this emulator they write to a stack slot of an earlier
+caller of the encounter code, the species never passes through that address, and
+they do not change encounters, whether applied at the master-code hook, at the
+frame boundary or before every instruction. They are accepted and applied as
+written (so codes that do work are unaffected), but use `wild_species` for this
+effect.
+
 ## Save states
 
 Press `0` to save the whole console to a state file beside the ROM
@@ -100,6 +213,7 @@ misread.
 | X | Start |
 | V | Select |
 | Shift (hold) | Fast-forward |
+| Tab | Open or close the cheat menu |
 | 0 | Save state (floppy-disk icon, top right) |
 | 1 | Load the saved state (disk with a circular arrow) |
 | F11 or Cmd+F | Toggle full screen |
@@ -133,6 +247,8 @@ src/
   input.rs     Button bit layout
   game_library.rs  Game library and save-file handling
   settings.rs  Per-game settings file (volume, window, speed)
+  cheats.rs    CodeBreaker-format cheat codes and built-in cheat directives
+  species.rs   Names of the 251 original species (for `wild_species`)
   state.rs     Binary codec for save states (each component saves its own fields)
   cli.rs       Command-line parsing
   frontend/    Desktop UI (minifb window, cpal audio)
@@ -171,16 +287,25 @@ audio state after every frame. Commercial ROMs are not included.
 
 ### Release-build codegen check
 
-With rustc 1.92 on aarch64-apple-darwin, `lto = "fat"` combined with
-`panic = "abort"` produced an invalid instruction and the app died with SIGILL
-shortly after launch, so `panic = "abort"` is deliberately not set (see
-`Cargo.toml`). After changing the release profile or toolchain, build and run
-`scripts/check_codegen.sh` to scan the binary for undecodable instructions.
+rustc 1.92 on aarch64-apple-darwin has miscompiled this project's release build
+twice. The first time `lto = "fat"` combined with `panic = "abort"` emitted an
+invalid instruction and the app died with SIGILL shortly after launch, so
+`panic = "abort"` is deliberately not set (see `Cargo.toml`). The second time the
+arm64 backend, with the 960-pixel window width inlined as a constant, computed a
+pixel index from the colour register instead of the row, and the release build
+segfaulted at startup while the debug build was fine; the drawing primitives are
+now `#[inline(never)]` to avoid it. After changing the release profile, the
+drawing code, or the toolchain, build in release and run
+`scripts/check_codegen.sh`: it scans the binary for undecodable instructions and
+then launches it for a few seconds (needs a display and a ROM in `rom/`) to make
+sure it does not crash.
 
 ## Known limitations
 
 - Mid-scanline register changes are not modelled; effects are per line.
 - PSG channels are not band-limited, and there is no audio-driven speed sync.
-- One save-state slot per game; no cheats, link cable or rumble.
+- One save-state slot per game. Only constant 8/16-bit RAM writes are
+  supported as cheats (no conditional, slide or ROM-patch codes), and no link
+  cable or rumble.
 - Verified mostly against Pokémon FireRed v1.0; other games may hit
   unimplemented behaviour.

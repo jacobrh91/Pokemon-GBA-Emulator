@@ -1,3 +1,5 @@
+use crate::cheat_options::CheatOptions;
+use crate::cheats::Cheats;
 use crate::cpu::Cpu;
 use crate::mmu::{MemoryBus, ROM_START};
 use crate::ppu::{Ppu, SCREEN_HEIGHT};
@@ -5,9 +7,16 @@ use std::io;
 
 mod idle;
 mod state;
+mod wild_species;
 use idle::IdleLoopDetector;
 
 const THUMB_STATE: u32 = 1 << 5;
+/// `cheat_hook` when the cheats are not tied to a ROM address; the program
+/// counter is never this value.
+const NO_HOOK: u32 = u32::MAX;
+/// A register value that is never written: "leave this argument alone".
+const NO_VALUE: u32 = u32::MAX;
+
 /// Granularity at which a halted CPU lets the rest of the system advance.
 const HALT_STEP_CYCLES: u32 = 32;
 
@@ -20,6 +29,21 @@ pub struct Emulator {
     idle: IdleLoopDetector,
     skip_idle_loops: bool,
     rom_path: String,
+    cheats: Cheats,
+    /// The ROM address the cheats are tied to while they are enabled, or
+    /// `NO_HOOK`.
+    cheat_hook: u32,
+    /// Bus address of the game's `CreateWildMon`, found once by a signature
+    /// scan of the ROM (see `wild_species.rs`); `None` if not recognised.
+    create_wild_mon: Option<u32>,
+    /// The cheat menu's options.
+    cheat_options: CheatOptions,
+    /// Where the wild-encounter override is applied while it is active, or
+    /// `NO_HOOK`, and the species / level written there (`NO_VALUE` to keep
+    /// the game's).
+    wild_species_hook: u32,
+    wild_species: u32,
+    wild_level: u32,
 }
 
 impl Emulator {
@@ -29,15 +53,24 @@ impl Emulator {
     /// Call `initialize_gba_startup` or set the CPU PC and execution mode
     /// before stepping.
     pub fn new(rom_path: &str) -> io::Result<Self> {
+        let memory = MemoryBus::new(rom_path)?;
+        let create_wild_mon = wild_species::find_create_wild_mon(&memory.rom);
         Ok(Self {
             cpu: Cpu::default(),
-            memory: MemoryBus::new(rom_path)?,
+            memory,
             ppu: Ppu::default(),
             frame_ready: false,
             rendering: true,
             idle: IdleLoopDetector::default(),
             skip_idle_loops: true,
             rom_path: rom_path.to_owned(),
+            cheats: Cheats::default(),
+            cheat_hook: NO_HOOK,
+            create_wild_mon,
+            cheat_options: CheatOptions::default(),
+            wild_species_hook: NO_HOOK,
+            wild_species: NO_VALUE,
+            wild_level: NO_VALUE,
         })
     }
 
@@ -92,6 +125,21 @@ impl Emulator {
         }
 
         let pc_before = self.cpu.registers[15];
+        // Cheats hooked to a ROM address run when execution reaches it, as
+        // the cartridge's code handler would.
+        if pc_before == self.cheat_hook {
+            self.cheats.apply(&mut self.memory);
+        }
+        // Wild-encounter override: replace the species and/or level
+        // arguments of the function that builds every wild encounter.
+        if pc_before == self.wild_species_hook {
+            if self.wild_species != NO_VALUE {
+                self.cpu.registers[0] = self.wild_species;
+            }
+            if self.wild_level != NO_VALUE {
+                self.cpu.registers[1] = self.wild_level;
+            }
+        }
         let mut cycles = if self.cpu.cpsr & THUMB_STATE != 0 {
             self.step_thumb()
         } else {
@@ -241,6 +289,81 @@ impl Emulator {
 
     pub fn render_frame(&mut self) {
         self.ppu.render_frame(&self.memory);
+    }
+
+    /// Installs the cheats applied by [`Emulator::apply_cheats`]. They survive
+    /// a [`reset`](Emulator::reset).
+    pub fn set_cheats(&mut self, cheats: Cheats) {
+        self.cheats = cheats;
+        self.update_cheat_hook();
+    }
+
+    fn update_cheat_hook(&mut self) {
+        // The cheats file's raw codes run only while their row of the menu is
+        // switched on: some of them patch routines the game has loaded only
+        // at certain moments (writing them at the title screen crashes it).
+        self.cheat_hook = if self.cheat_options.file_codes {
+            self.cheats.hook_address().unwrap_or(NO_HOOK)
+        } else {
+            NO_HOOK
+        };
+        // The wild-encounter override, driven by its row of the menu.
+        self.wild_species_hook = NO_HOOK;
+        self.wild_species = NO_VALUE;
+        self.wild_level = NO_VALUE;
+        if let Some(entry) = self.create_wild_mon {
+            let species = self.cheat_options.active_wild_species();
+            let level = self.cheat_options.active_wild_level();
+            if species.is_some() || level.is_some() {
+                self.wild_species_hook = entry;
+                if let Some(species) = species {
+                    self.wild_species = u32::from(species);
+                }
+                if let Some(level) = level {
+                    self.wild_level = u32::from(CheatOptions::clamp_level(level));
+                }
+            }
+        }
+    }
+
+    /// Installs the cheat menu's options. Today the wild-encounter row and the
+    /// cheats file's codes take effect; the other rows are kept for when they
+    /// are implemented.
+    pub fn set_cheat_options(&mut self, options: CheatOptions) {
+        if options != self.cheat_options {
+            self.cheat_options = options;
+            self.update_cheat_hook();
+        }
+    }
+
+    pub fn cheat_options(&self) -> CheatOptions {
+        self.cheat_options
+    }
+
+    /// The bus address the wild-species override hooks in this ROM (the entry
+    /// of `CreateWildMon`), or `None` when the ROM is not a FireRed build
+    /// whose function the signature scan can identify.
+    pub fn wild_species_hook_address(&self) -> Option<u32> {
+        self.create_wild_mon
+    }
+
+    /// Whether the wild-species override can work with this ROM.
+    pub fn wild_species_supported(&self) -> bool {
+        self.create_wild_mon.is_some()
+    }
+
+    pub fn cheats(&self) -> &Cheats {
+        &self.cheats
+    }
+
+    /// Writes the cheats' values into RAM. Call once per finished frame, so
+    /// the values keep winning against the game rewriting them. Cheats that
+    /// name a hook address are instead applied when execution reaches it (see
+    /// [`Emulator::step`]), so this does nothing for them.
+    pub fn apply_cheats(&mut self) {
+        if self.cheat_options.file_codes && self.cheat_hook == NO_HOOK && !self.cheats.is_empty() {
+            self.cheats.apply(&mut self.memory);
+        }
     }
 }
 

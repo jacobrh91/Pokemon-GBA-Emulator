@@ -642,3 +642,289 @@ fn reset_restarts_the_console_but_keeps_the_save() {
     assert!(emulator.cpu().cycles > 0);
     fs::remove_file(path).unwrap();
 }
+
+/// Options with the cheats file's raw codes switched on.
+fn codes_on() -> CheatOptions {
+    CheatOptions {
+        file_codes: true,
+        ..CheatOptions::default()
+    }
+}
+
+#[test]
+fn cheats_override_a_game_that_keeps_rewriting_the_value() {
+    use crate::cheats::Cheats;
+    // Forever: halfword [0x03007D4E] = 0x12.
+    let program = [
+        0xE3A0_0403, // mov  r0, #0x03000000
+        0xE280_0C7D, // add  r0, r0, #0x7D00
+        0xE280_004E, // add  r0, r0, #0x4E
+        0xE3A0_1012, // mov  r1, #0x12
+        0xE1C0_10B0, // strh r1, [r0]
+        0xEAFF_FFFD, // b    (back to the strh)
+    ];
+    let run_frame = |emulator: &mut Emulator| {
+        while !emulator.take_frame_ready() {
+            emulator.step().unwrap();
+        }
+    };
+
+    let mut plain = emulator_for(&program, false);
+    run_frame(&mut plain);
+    assert_eq!(plain.memory().read_u16(0x0300_7D4E).unwrap(), 0x0012);
+
+    let mut cheating = emulator_for(&program, false);
+    cheating.set_cheats(Cheats::parse("83007D4E 0093"));
+    cheating.set_cheat_options(codes_on());
+    run_frame(&mut cheating);
+    assert_eq!(
+        cheating.memory().read_u16(0x0300_7D4E).unwrap(),
+        0x0012,
+        "the cheat is applied at the frame boundary, not during the frame"
+    );
+    cheating.apply_cheats();
+    assert_eq!(cheating.memory().read_u16(0x0300_7D4E).unwrap(), 0x0093);
+
+    // The game overwrites it again during the next frame; the cheat wins
+    // again at the end of it.
+    run_frame(&mut cheating);
+    assert_eq!(cheating.memory().read_u16(0x0300_7D4E).unwrap(), 0x0012);
+    cheating.apply_cheats();
+    assert_eq!(cheating.memory().read_u16(0x0300_7D4E).unwrap(), 0x0093);
+}
+
+/// A loop that stores 0x12 to [0x03007D4E]; the instruction at ROM offset
+/// 0x14 is the "hook" the cheats attach to.
+const HOOK_PROGRAM: [u32; 7] = [
+    0xE3A0_0403, // mov  r0, #0x03000000
+    0xE280_0C7D, // add  r0, r0, #0x7D00
+    0xE280_004E, // add  r0, r0, #0x4E
+    0xE3A0_1012, // mov  r1, #0x12
+    0xE1C0_10B0, // strh r1, [r0]      (offset 0x10)
+    0xE1A0_2002, // mov  r2, r2        (offset 0x14, the hook)
+    0xEAFF_FFFC, // b    strh
+];
+
+fn run_until_pc(emulator: &mut Emulator, pc: u32) {
+    for _ in 0..1000 {
+        if emulator.cpu().registers[15] == pc {
+            return;
+        }
+        emulator.step().unwrap();
+    }
+    panic!("never reached {pc:#010X}");
+}
+
+#[test]
+fn cheats_tied_to_a_hook_apply_when_execution_reaches_it() {
+    use crate::cheats::Cheats;
+    let mut emulator = emulator_for(&HOOK_PROGRAM, false);
+    emulator.set_cheats(Cheats::parse("10000014 0007\n83007D4E 0093"));
+    emulator.set_cheat_options(codes_on());
+    let slot = 0x0300_7D4E;
+
+    run_until_pc(&mut emulator, 0x0800_0014);
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0012);
+    emulator.step().unwrap(); // the hook instruction: writes, then executes
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0093);
+
+    // Back around the loop the game stores its value again...
+    run_until_pc(&mut emulator, 0x0800_0014);
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0012);
+
+    // ...and the per-frame application is not used for a hooked set.
+    emulator.memory_mut().write_u16(slot, 0x0077).unwrap();
+    emulator.apply_cheats();
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0077);
+}
+
+#[test]
+fn the_cheats_file_rows_switch_gates_its_codes_and_can_be_flipped_back() {
+    use crate::cheats::Cheats;
+    let mut emulator = emulator_for(&HOOK_PROGRAM, false);
+    emulator.set_cheats(Cheats::parse("10000014 0007\n83007D4E 0093"));
+    // Off to begin with: the default options leave the codes alone.
+    assert!(!emulator.cheat_options().file_codes);
+    let slot = 0x0300_7D4E;
+
+    run_until_pc(&mut emulator, 0x0800_0014);
+    emulator.step().unwrap();
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0012);
+
+    emulator.set_cheat_options(codes_on());
+    run_until_pc(&mut emulator, 0x0800_0014);
+    emulator.step().unwrap();
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0093);
+
+    // Switched off again, the codes stop (the game's own value returns).
+    emulator.set_cheat_options(CheatOptions::default());
+    run_until_pc(&mut emulator, 0x0800_0014);
+    assert_eq!(emulator.memory().read_u16(slot).unwrap(), 0x0012);
+
+    // Unhooked codes honour the switch at the frame boundary too.
+    let mut plain = emulator_for(&HOOK_PROGRAM, false);
+    plain.set_cheats(Cheats::parse("83007D4E 0093"));
+    plain.apply_cheats();
+    assert_eq!(plain.memory().read_u16(slot).unwrap(), 0);
+    plain.set_cheat_options(codes_on());
+    plain.apply_cheats();
+    assert_eq!(plain.memory().read_u16(slot).unwrap(), 0x0093);
+}
+
+/// A ROM shaped like a FireRed build around `CreateWildMon`: the header holds
+/// `game_code`; the code loads species 0x13 and level 4, then switches to
+/// Thumb state and calls a function at ROM offset `function` that begins with
+/// the real function's prologue (the signature the scan looks for) and spins.
+/// Once the prologue has run, `r4` holds the species the function received.
+fn wild_mon_rom(game_code: &[u8; 4], function: usize) -> std::path::PathBuf {
+    let mut rom = vec![0u8; 0x8_3000];
+    let mut put = |offset: usize, word: u32| {
+        rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    put(0x00, 0xEA00_002E); // b 0xC0 (over the header)
+    put(0xC0, 0xE3A0_0013); // mov r0, #0x13
+    put(0xC4, 0xE3A0_1004); // mov r1, #4
+    put(0xC8, 0xE59F_2004); // ldr r2, [pc, #4]   (the word at 0xD4)
+    put(0xCC, 0xE12F_FF12); // bx  r2
+    put(0xD4, 0x0800_0000 + function as u32 + 1); // Thumb entry
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    rom[function..function + 16].copy_from_slice(&super::wild_species::SIGNATURE);
+    rom[function + 16..function + 18].copy_from_slice(&0xE7FEu16.to_le_bytes()); // b .
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("gba-wild-test-{}-{id}.gba", std::process::id()));
+    std::fs::write(&path, rom).unwrap();
+    path
+}
+
+/// Runs the ROM with `options` and returns `(species, level)` as the
+/// function received them (`r4`, `r6` once its prologue has masked its
+/// arguments), whether the build was recognised, and the hook address.
+fn wild_run(
+    game_code: &[u8; 4],
+    function: usize,
+    options: CheatOptions,
+    file: &str,
+) -> (u32, u32, bool, Option<u32>) {
+    use crate::cheats::Cheats;
+    let path = wild_mon_rom(game_code, function);
+    let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    emulator.initialize_gba_startup(ROM_START).unwrap();
+    emulator.set_cheats(Cheats::parse(file));
+    emulator.set_cheat_options(options);
+    for _ in 0..24 {
+        emulator.step().unwrap();
+    }
+    (
+        emulator.cpu().registers[4],
+        emulator.cpu().registers[6],
+        emulator.wild_species_supported(),
+        emulator.wild_species_hook_address(),
+    )
+}
+
+/// The wild-encounter row switched on with the given species and level.
+fn wild(species: Option<u16>, level: Option<u8>) -> CheatOptions {
+    CheatOptions {
+        wild_enabled: true,
+        wild_species: species,
+        wild_level: level,
+        ..CheatOptions::default()
+    }
+}
+
+#[test]
+fn the_wild_row_replaces_the_species_and_level_arguments() {
+    // The synthetic caller asks for species 0x13 at level 4.
+    let (species, level, supported, hook) =
+        wild_run(b"BPRE", 0x8_29FC, CheatOptions::default(), "");
+    assert_eq!(
+        (species, level),
+        (0x13, 4),
+        "nothing set: the game's choice"
+    );
+    assert!(supported);
+    assert_eq!(hook, Some(0x0808_29FC));
+
+    assert_eq!(
+        wild_run(b"BPRE", 0x8_29FC, wild(Some(147), None), "").0,
+        147
+    );
+    assert_eq!(wild_run(b"BPRE", 0x8_29FC, wild(Some(25), None), "").0, 25);
+    // Species and level are independent.
+    let (species, level, ..) = wild_run(b"BPRE", 0x8_29FC, wild(Some(147), None), "");
+    assert_eq!((species, level), (147, 4));
+    let (species, level, ..) = wild_run(b"BPRE", 0x8_29FC, wild(None, Some(50)), "");
+    assert_eq!((species, level), (0x13, 50));
+    let (species, level, ..) = wild_run(b"BPRE", 0x8_29FC, wild(Some(25), Some(7)), "");
+    assert_eq!((species, level), (25, 7));
+}
+
+#[test]
+fn a_wild_row_that_is_switched_off_keeps_its_choices_but_does_nothing() {
+    let off = CheatOptions {
+        wild_enabled: false,
+        wild_species: Some(147),
+        wild_level: Some(50),
+        ..CheatOptions::default()
+    };
+    let (species, level, ..) = wild_run(b"BPRE", 0x8_29FC, off, "");
+    assert_eq!((species, level), (0x13, 4));
+    let on = CheatOptions {
+        wild_enabled: true,
+        ..off
+    };
+    let (species, level, ..) = wild_run(b"BPRE", 0x8_29FC, on, "");
+    assert_eq!((species, level), (147, 50));
+}
+
+#[test]
+fn the_cheats_files_wild_species_line_is_not_read_by_the_emulator() {
+    // The frontend turns it into the menu's species; on its own it does
+    // nothing, so there is one switch for the effect: the row's.
+    let (species, ..) = wild_run(
+        b"BPRE",
+        0x8_29FC,
+        CheatOptions::default(),
+        "wild_species = Dratini",
+    );
+    assert_eq!(species, 0x13);
+    let (species, ..) = wild_run(
+        b"BPRE",
+        0x8_29FC,
+        CheatOptions {
+            file_codes: true,
+            ..CheatOptions::default()
+        },
+        "wild_species = Dratini",
+    );
+    assert_eq!(species, 0x13, "not even with the file's codes switched on");
+}
+
+#[test]
+fn the_function_is_found_wherever_the_build_put_it() {
+    // Same code, different builds: the hook follows the function.
+    for function in [0x8_25E8, 0x8_29FC, 0x8_2A10] {
+        let (species, _, supported, hook) = wild_run(b"BPRJ", function, wild(Some(147), None), "");
+        assert!(supported);
+        assert_eq!(hook, Some(0x0800_0000 + function as u32));
+        assert_eq!(species, 147, "function at {function:#X}");
+    }
+}
+
+#[test]
+fn the_wild_row_only_applies_to_firered_roms_and_clamps_the_level() {
+    let (species, level, supported, hook) =
+        wild_run(b"AXVE", 0x8_29FC, wild(Some(25), Some(50)), "");
+    assert!(!supported);
+    assert_eq!(hook, None);
+    assert_eq!(
+        (species, level),
+        (0x13, 4),
+        "another game must be left alone"
+    );
+
+    let (_, level, ..) = wild_run(b"BPRE", 0x8_29FC, wild(None, Some(250)), "");
+    assert_eq!(level, 100);
+}

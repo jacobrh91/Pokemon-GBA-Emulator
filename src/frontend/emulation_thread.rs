@@ -5,6 +5,7 @@
 use super::audio_output::AudioSink;
 use super::load_jitter::{JitterBag, advance_frames};
 use gba_emulator::apu::SAMPLE_RATE;
+use gba_emulator::cheat_options::CheatOptions;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::game_library;
 use gba_emulator::ppu::{Pixel, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -64,6 +65,10 @@ pub(super) struct Shared {
     /// Set by the UI to ask for a save state operation ([`STATE_SAVE`] or
     /// [`STATE_LOAD`]); cleared by the emulation thread.
     pub(super) state_request: AtomicU8,
+    /// The cheat menu's options, and a counter bumped each time they change
+    /// so the emulation thread applies them once.
+    pub(super) cheat_options: Mutex<CheatOptions>,
+    pub(super) cheat_options_version: AtomicU32,
     /// Upper bound of the random extra frames run after loading a state.
     pub(super) load_jitter_frames: AtomicU32,
     /// The last completed state operation as `count << 2 | kind`
@@ -78,6 +83,14 @@ pub(super) struct Shared {
 }
 
 impl Shared {
+    /// Publishes new cheat-menu options for the emulation thread.
+    pub(super) fn set_cheat_options(&self, options: CheatOptions) {
+        if let Ok(mut slot) = self.cheat_options.lock() {
+            *slot = options;
+        }
+        self.cheat_options_version.fetch_add(1, Ordering::Release);
+    }
+
     pub(super) fn new() -> Self {
         Self {
             buttons: AtomicU16::new(0),
@@ -88,6 +101,8 @@ impl Shared {
             restart: AtomicBool::new(false),
             restarts: AtomicU32::new(0),
             state_request: AtomicU8::new(0),
+            cheat_options: Mutex::new(CheatOptions::default()),
+            cheat_options_version: AtomicU32::new(0),
             load_jitter_frames: AtomicU32::new(0),
             state_notice: AtomicU32::new(0),
             frames: AtomicU64::new(0),
@@ -106,6 +121,7 @@ pub(super) fn emulation_loop(
     state_path: &Path,
 ) {
     let mut state_operations = 0_u32;
+    let mut applied_options_version = 0_u32;
     let mut jitter = JitterBag::new();
     let mut next_frame = Instant::now();
     let mut last_save_check = Instant::now();
@@ -178,6 +194,7 @@ pub(super) fn emulation_loop(
         }
 
         emulator.set_buttons(shared.buttons.load(Ordering::Relaxed));
+        sync_cheat_options(shared, &mut applied_options_version, &mut emulator);
 
         // Fast-forward emulates flat out but only draws the frames that will
         // be shown. Decided here, at a frame boundary.
@@ -200,6 +217,9 @@ pub(super) fn emulation_loop(
             }
             instructions += 1;
         }
+
+        // Cheats are rewritten once per finished frame.
+        emulator.apply_cheats();
 
         // Sped-up audio would only overflow the queue, so it is dropped.
         let samples = emulator.take_audio_samples();
@@ -284,6 +304,18 @@ pub(super) fn emulation_loop(
     }
     // Shutting down: make sure the last writes reach the disk.
     flush_save(&mut emulator, save_path);
+}
+
+/// Applies the cheat-menu options the UI published since `applied_version`
+/// (a no-op when nothing changed), updating `applied_version`.
+fn sync_cheat_options(shared: &Shared, applied_version: &mut u32, emulator: &mut Emulator) {
+    let version = shared.cheat_options_version.load(Ordering::Acquire);
+    if version != *applied_version {
+        *applied_version = version;
+        if let Ok(options) = shared.cheat_options.lock() {
+            emulator.set_cheat_options(*options);
+        }
+    }
 }
 
 /// Writes a save state beside the ROM. Returns whether it was written.
@@ -503,6 +535,43 @@ mod tests {
         worker.join().unwrap();
         assert!(shared.error.lock().unwrap().is_none());
         std::fs::remove_file(state_path).unwrap();
+    }
+
+    #[test]
+    fn published_cheat_options_reach_the_emulator_once() {
+        use gba_emulator::cheat_options::CheatOptions;
+        let path = spin_rom();
+        let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let shared = Shared::new();
+        let mut applied = 0;
+
+        // Nothing published yet: nothing applied.
+        sync_cheat_options(&shared, &mut applied, &mut emulator);
+        assert!(emulator.cheat_options().is_default());
+
+        let options = CheatOptions {
+            wild_species: Some(147),
+            wild_level: Some(50),
+            infinite_money: true,
+            ..CheatOptions::default()
+        };
+        shared.set_cheat_options(options);
+        sync_cheat_options(&shared, &mut applied, &mut emulator);
+        assert_eq!(emulator.cheat_options(), options);
+        assert_eq!(applied, 1);
+
+        // A later change replaces it; an unchanged version does nothing.
+        let later = CheatOptions {
+            shiny: true,
+            ..CheatOptions::default()
+        };
+        shared.set_cheat_options(later);
+        sync_cheat_options(&shared, &mut applied, &mut emulator);
+        assert_eq!(emulator.cheat_options(), later);
+        let version = applied;
+        sync_cheat_options(&shared, &mut applied, &mut emulator);
+        assert_eq!(applied, version);
     }
 
     #[test]

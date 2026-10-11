@@ -22,6 +22,9 @@ pub(super) const KEY_BINDINGS: [(Key, Buttons); 10] = [
 pub(super) const SAVE_STATE_KEY: Key = Key::Key0;
 pub(super) const LOAD_STATE_KEY: Key = Key::Key1;
 
+/// Tab opens and closes the cheat menu (the same as its dock button).
+pub(super) const CHEAT_MENU_KEY: Key = Key::Tab;
+
 /// What a press of Escape should do.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum EscapeAction {

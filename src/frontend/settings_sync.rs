@@ -4,6 +4,7 @@
 //! written at most once a second (volume drags change every frame) and again
 //! on exit, so an abnormal exit loses at most a second of changes.
 
+use gba_emulator::cheat_options::CheatOptions;
 use gba_emulator::settings::{MAX_WINDOW_WIDTH, MIN_WINDOW_WIDTH, Settings};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -49,7 +50,14 @@ impl SettingsSync {
         fast_forward: Option<u32>,
         fullscreen: bool,
         windowed_size: Option<(f32, f32)>,
+        cheat_options: CheatOptions,
     ) {
+        // The cheats file's codes are never saved, so they must not count as
+        // a change either.
+        self.current.cheat_options = CheatOptions {
+            file_codes: false,
+            ..cheat_options
+        };
         self.current.volume = volume;
         self.current.muted = muted;
         self.current.fast_forward = fast_forward;
@@ -111,7 +119,7 @@ mod tests {
     #[test]
     fn changes_are_written_on_flush_and_read_back() {
         let (mut sync, path) = sync();
-        sync.observe(0.25, true, Some(4), false, None);
+        sync.observe(0.25, true, Some(4), false, None, CheatOptions::default());
         assert!(!path.exists(), "writes are rate limited");
         sync.flush();
         let saved = Settings::load(&path).unwrap();
@@ -125,7 +133,14 @@ mod tests {
     fn nothing_is_written_when_nothing_changed() {
         let (mut sync, path) = sync();
         let defaults = Settings::default();
-        sync.observe(defaults.volume, false, None, false, None);
+        sync.observe(
+            defaults.volume,
+            false,
+            None,
+            false,
+            None,
+            CheatOptions::default(),
+        );
         sync.flush();
         assert!(!path.exists());
     }
@@ -134,14 +149,35 @@ mod tests {
     fn a_window_size_is_remembered_only_once_it_holds_still() {
         let (mut sync, path) = sync();
         for _ in 0..STABLE_FRAMES - 1 {
-            sync.observe(0.8, false, None, false, Some((1200.0, 800.0)));
+            sync.observe(
+                0.8,
+                false,
+                None,
+                false,
+                Some((1200.0, 800.0)),
+                CheatOptions::default(),
+            );
         }
         assert_eq!(sync.settings().window_size, None);
-        sync.observe(0.8, false, None, false, Some((1200.0, 800.0)));
+        sync.observe(
+            0.8,
+            false,
+            None,
+            false,
+            Some((1200.0, 800.0)),
+            CheatOptions::default(),
+        );
         assert_eq!(sync.settings().window_size, Some((1200, 800)));
         // A moving size (an animation) does not replace it.
         for step in 0..100 {
-            sync.observe(0.8, false, None, false, Some((1300.0 + step as f32, 866.0)));
+            sync.observe(
+                0.8,
+                false,
+                None,
+                false,
+                Some((1300.0 + step as f32, 866.0)),
+                CheatOptions::default(),
+            );
         }
         assert_eq!(sync.settings().window_size, Some((1200, 800)));
         let _ = std::fs::remove_file(path);
@@ -151,13 +187,68 @@ mod tests {
     fn full_screen_does_not_overwrite_the_windowed_size() {
         let (mut sync, path) = sync();
         for _ in 0..STABLE_FRAMES {
-            sync.observe(0.8, false, None, false, Some((960.0, 640.0)));
+            sync.observe(
+                0.8,
+                false,
+                None,
+                false,
+                Some((960.0, 640.0)),
+                CheatOptions::default(),
+            );
         }
         for _ in 0..STABLE_FRAMES * 2 {
-            sync.observe(0.8, false, None, true, Some((1496.0, 934.0)));
+            sync.observe(
+                0.8,
+                false,
+                None,
+                true,
+                Some((1496.0, 934.0)),
+                CheatOptions::default(),
+            );
         }
         assert_eq!(sync.settings().window_size, Some((960, 640)));
         assert!(sync.settings().fullscreen);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cheat_menu_options_are_written_with_the_other_settings() {
+        let (mut sync, path) = sync();
+        let options = CheatOptions {
+            wild_species: Some(147),
+            wild_level: Some(50),
+            catch_always: true,
+            ..CheatOptions::default()
+        };
+        sync.observe(0.8, false, None, false, None, options);
+        sync.flush();
+        let saved = Settings::load(&path).unwrap();
+        assert_eq!(saved.cheat_options, options);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn the_cheats_file_switch_is_neither_saved_nor_a_reason_to_save() {
+        let (mut sync, path) = sync();
+        let with_codes = CheatOptions {
+            file_codes: true,
+            ..CheatOptions::default()
+        };
+        sync.observe(0.8, false, None, false, None, with_codes);
+        sync.flush();
+        assert!(!path.exists(), "switching the file's codes writes nothing");
+
+        // With a real change alongside, the file is written without it.
+        let both = CheatOptions {
+            file_codes: true,
+            infinite_money: true,
+            ..CheatOptions::default()
+        };
+        sync.observe(0.8, false, None, false, None, both);
+        sync.flush();
+        let saved = Settings::load(&path).unwrap();
+        assert!(saved.cheat_options.infinite_money);
+        assert!(!saved.cheat_options.file_codes);
+        std::fs::remove_file(path).unwrap();
     }
 }

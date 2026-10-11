@@ -1,6 +1,6 @@
 //! On-screen status indicators drawn over the game.
 
-use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, GLYPH_WIDTH, Rect, TEXT_SCALE};
+use crate::frontend::draw::{Canvas, GLYPH_ADVANCE, GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
 
 const MARGIN: i32 = 14;
 const PADDING_X: i32 = 12;
@@ -85,13 +85,13 @@ pub fn format_speed(factor: f32) -> String {
 /// top-left corner of the frame.
 pub fn draw_fast_forward(buffer: &mut [u32], width: usize, height: usize, factor: f32) {
     let label = format_speed(factor);
-    let glyph_advance = (GLYPH_WIDTH + 1) * TEXT_SCALE;
-    let icon_width = 2 * glyph_advance;
-    let text_width = label.chars().count() as i32 * glyph_advance - TEXT_SCALE;
+    let glyph_advance = GLYPH_ADVANCE;
+    let icon_width = text_width(">>");
+    let label_width = text_width(&label);
     let badge = Rect {
         x: MARGIN,
         y: MARGIN,
-        width: PADDING_X * 2 + icon_width + glyph_advance / 2 + text_width,
+        width: PADDING_X * 2 + icon_width + glyph_advance / 2 + label_width,
         height: HEIGHT,
     };
 

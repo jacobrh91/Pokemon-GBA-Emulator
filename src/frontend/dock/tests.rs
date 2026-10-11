@@ -1,7 +1,7 @@
 use super::draw::{FILL_COLOR, POWER_COLOR, POWER_SYMBOL_COLOR};
 use super::layout::*;
 use super::*;
-use crate::frontend::draw::{GLYPH_WIDTH, TEXT_SCALE};
+use crate::frontend::draw::text_width;
 
 const W: usize = 960;
 const H: usize = 640;
@@ -108,7 +108,7 @@ fn controls_are_ordered_power_restart_volume_speed_inside_the_dock() {
     assert!(layout.restart_divider_x > layout.fullscreen.x + layout.fullscreen.width);
     assert!(layout.icon.x > layout.restart_divider_x);
     // Volume text, then the speed divider, then the four speed buttons.
-    let text_end = layout.text_x + 4 * (GLYPH_WIDTH + 1) * TEXT_SCALE;
+    let text_end = layout.text_x + text_width("100%");
     assert!(text_end < layout.divider_x);
     let first = layout.speed_buttons[0];
     let last = layout.speed_buttons[3];
@@ -307,7 +307,7 @@ fn speed_buttons_fit_inside_the_dock_without_overlapping_the_volume_controls() {
     }
     assert!(previous_right < dock_right);
     // The volume percentage text ends before the divider.
-    let text_end = layout.text_x + 4 * (GLYPH_WIDTH + 1) * TEXT_SCALE;
+    let text_end = layout.text_x + text_width("100%");
     assert!(text_end < layout.divider_x);
     assert!(layout.dock.x >= 0 && dock_right <= W as i32);
 }
@@ -375,4 +375,217 @@ fn fullscreen_button_requests_a_toggle_once_per_click() {
     // It is neither a restart nor a quit.
     assert!(!dock.take_restart_request());
     assert!(!dock.take_quit_request());
+}
+
+fn click_at(dock: &mut Dock, point: (f32, f32)) {
+    let down = Pointer {
+        position: Some(point),
+        left_down: true,
+        ..Pointer::default()
+    };
+    dock.update(down, W, H);
+    dock.update(hover(point.0, point.1), W, H);
+}
+
+fn centre_of(rect: crate::frontend::draw::Rect) -> (f32, f32) {
+    (
+        rect.x as f32 + rect.width as f32 / 2.0,
+        rect.y as f32 + rect.height as f32 / 2.0,
+    )
+}
+
+#[test]
+fn the_cheats_button_is_the_rightmost_control_of_the_dock() {
+    let layout = Layout::new(W, H);
+    for other in layout.speed_buttons {
+        assert!(other.x + other.width < layout.cheats_divider_x);
+    }
+    for other in [layout.power, layout.restart, layout.fullscreen, layout.icon] {
+        assert!(other.x + other.width < layout.cheats.x);
+    }
+    assert!(layout.cheats_divider_x < layout.cheats.x);
+    // It ends where the dock's padding begins, and the dock still fits.
+    assert_eq!(
+        layout.cheats.x + layout.cheats.width,
+        layout.dock.x + layout.dock.width - DOCK_PADDING
+    );
+    assert!(layout.dock.x >= 0 && layout.dock.x + layout.dock.width <= W as i32);
+    assert!(layout.cheats.width >= text_width("CHEATS"));
+    // The power button is back at the left end.
+    assert_eq!(layout.power.x, layout.dock.x + DOCK_PADDING);
+}
+
+#[test]
+fn the_cheats_button_opens_and_closes_the_menu() {
+    let layout = Layout::new(W, H);
+    let button = centre_of(layout.cheats);
+    let mut dock = Dock::new(0.5);
+    settle(&mut dock, hover(button.0, button.1));
+    assert!(!dock.menu_open());
+
+    click_at(&mut dock, button);
+    assert!(dock.menu_open());
+    click_at(&mut dock, button);
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn an_open_menu_keeps_the_dock_up_and_a_click_elsewhere_dismisses_it() {
+    let layout = Layout::new(W, H);
+    let button = centre_of(layout.cheats);
+    let mut dock = Dock::new(0.5);
+    settle(&mut dock, hover(button.0, button.1));
+    click_at(&mut dock, button);
+    assert!(dock.menu_open());
+
+    // Even with the mouse resting somewhere harmless for a long time.
+    let still = hover(20.0, 20.0);
+    for _ in 0..(HIDE_AFTER_IDLE_FRAMES * 2) {
+        dock.update(still, W, H);
+    }
+    assert!(
+        dock.reveal() > 0.9,
+        "the dock stays up while the menu is open"
+    );
+    assert!(dock.menu_open());
+
+    // A click in the game area closes it.
+    click_at(&mut dock, (20.0, 20.0));
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn clicking_another_dock_button_closes_the_menu_and_still_works() {
+    let layout = Layout::new(W, H);
+    let mut dock = Dock::new(0.5);
+    settle(
+        &mut dock,
+        hover(centre_of(layout.cheats).0, centre_of(layout.cheats).1),
+    );
+    click_at(&mut dock, centre_of(layout.cheats));
+    assert!(dock.menu_open());
+    click_at(&mut dock, centre_of(layout.fullscreen));
+    assert!(!dock.menu_open());
+    assert!(
+        dock.take_fullscreen_request(),
+        "the click was not swallowed"
+    );
+}
+
+#[test]
+fn menu_choices_are_reported_once_and_do_not_press_dock_buttons() {
+    use cheat_menu::MenuLayout;
+    let layout = Layout::new(W, H);
+    let menu = MenuLayout::new(W, layout.dock, false);
+    let mut dock = Dock::new(0.5);
+    settle(
+        &mut dock,
+        hover(centre_of(layout.cheats).0, centre_of(layout.cheats).1),
+    );
+    click_at(&mut dock, centre_of(layout.cheats));
+    assert_eq!(dock.take_cheat_options_change(), None);
+
+    click_at(&mut dock, centre_of(menu.money));
+    let changed = dock
+        .take_cheat_options_change()
+        .expect("a change is reported");
+    assert!(changed.infinite_money);
+    assert_eq!(dock.take_cheat_options_change(), None, "only once");
+    assert!(dock.cheat_options().infinite_money);
+    assert!(dock.menu_open(), "choosing an option leaves the menu open");
+
+    // Nothing in the dock fired.
+    assert!(!dock.take_quit_request());
+    assert!(!dock.take_restart_request());
+    assert!(!dock.take_fullscreen_request());
+}
+
+#[test]
+fn restored_options_are_not_reported_as_a_change() {
+    let mut dock = Dock::new(0.5);
+    let options = gba_emulator::cheat_options::CheatOptions {
+        wild_species: Some(147),
+        wild_level: Some(20),
+        ..Default::default()
+    };
+    dock.set_cheat_options(options);
+    assert_eq!(dock.cheat_options(), options);
+    assert_eq!(dock.take_cheat_options_change(), None);
+}
+
+#[test]
+fn escape_closes_the_menu_through_close_menu() {
+    let layout = Layout::new(W, H);
+    let mut dock = Dock::new(0.5);
+    settle(
+        &mut dock,
+        hover(centre_of(layout.cheats).0, centre_of(layout.cheats).1),
+    );
+    click_at(&mut dock, centre_of(layout.cheats));
+    assert!(dock.menu_open());
+    dock.close_menu();
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn the_dock_with_the_menu_and_list_open_draws_inside_the_window() {
+    let mut dock = Dock::new(0.8);
+    dock.open_everything_for_smoke_test();
+    let mut buffer = vec![0u32; W * H];
+    dock.draw(&mut buffer, W, H);
+    assert!(buffer.iter().any(|p| *p != 0));
+    // The menu's panel is above the dock and below the top of the window.
+    let layout = Layout::new(W, H);
+    let menu = cheat_menu::MenuLayout::new(W, layout.dock, false);
+    let probe = (menu.panel.y + 4) as usize * W + (menu.panel.x + 40) as usize;
+    assert_ne!(buffer[probe], 0, "the panel is painted");
+}
+
+#[test]
+fn tab_opens_and_closes_the_menu_the_same_way_the_button_does() {
+    // The frontend calls `toggle_menu` for Tab.
+    let mut dock = Dock::new(0.5);
+    assert!(!dock.menu_open());
+    dock.toggle_menu();
+    assert!(dock.menu_open());
+    dock.toggle_menu();
+    assert!(!dock.menu_open());
+    // And it mixes freely with the button and Escape.
+    let layout = Layout::new(W, H);
+    dock.toggle_menu();
+    settle(
+        &mut dock,
+        hover(centre_of(layout.cheats).0, centre_of(layout.cheats).1),
+    );
+    click_at(&mut dock, centre_of(layout.cheats));
+    assert!(!dock.menu_open(), "the button closes a menu Tab opened");
+    dock.toggle_menu();
+    dock.close_menu();
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn the_menu_has_a_cheats_file_row_only_when_the_file_has_codes() {
+    use cheat_menu::MenuLayout;
+    let layout = Layout::new(W, H);
+    let mut dock = Dock::new(0.5);
+    dock.toggle_menu();
+    settle(
+        &mut dock,
+        hover(centre_of(layout.cheats).0, centre_of(layout.cheats).1),
+    );
+
+    // No codes: the row is absent, so the topmost row is the wild one.
+    let bare = MenuLayout::new(W, layout.dock, false);
+    assert!(bare.file_codes.is_none());
+
+    // With codes the row appears and its checkbox switches them on.
+    dock.set_file_codes_available(4);
+    let with = MenuLayout::new(W, layout.dock, true);
+    click_at(&mut dock, centre_of(with.file_codes.unwrap()));
+    assert!(dock.cheat_options().file_codes);
+    let change = dock.take_cheat_options_change().expect("reported");
+    assert!(change.file_codes);
+    click_at(&mut dock, centre_of(with.file_codes.unwrap()));
+    assert!(!dock.cheat_options().file_codes);
 }

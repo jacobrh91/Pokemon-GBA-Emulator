@@ -47,7 +47,15 @@ impl<'a> Canvas<'a> {
     }
 }
 
+// The pixel primitives are kept out of line on purpose. With fat LTO they get
+// inlined into `frontend::run` with the 960-pixel width known at compile time,
+// and rustc 1.92's arm64 backend then miscompiled `y * 960` (once as an
+// invalid instruction, once by subtracting the colour register instead of `y`,
+// which wrote the pixel far outside the buffer and crashed at launch). With a
+// runtime width the multiply is an ordinary `mul`. `scripts/check_codegen.sh`
+// runs the release build to catch a recurrence.
 impl Canvas<'_> {
+    #[inline(never)]
     pub(crate) fn blend(&mut self, x: i32, y: i32, color: u32, alpha: f32) {
         let y = y + self.offset_y;
         if x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
@@ -66,6 +74,7 @@ impl Canvas<'_> {
         *pixel = (mix(16) << 16) | (mix(8) << 8) | mix(0);
     }
 
+    #[inline(never)]
     pub(crate) fn rect(&mut self, x: i32, y: i32, width: i32, height: i32, color: u32) {
         for row in y..y + height {
             for column in x..x + width {
@@ -74,6 +83,7 @@ impl Canvas<'_> {
         }
     }
 
+    #[inline(never)]
     pub(crate) fn rounded_rect(&mut self, rect: Rect, radius: i32, color: u32, alpha: f32) {
         let radius = radius.min(rect.width / 2).min(rect.height / 2);
         for row in 0..rect.height {
@@ -206,7 +216,7 @@ impl Canvas<'_> {
         }
     }
 
-    /// Draws `text` in the built-in 3x5 font at [`TEXT_SCALE`].
+    /// Draws `text` in the built-in bold 5x7 font at [`TEXT_SCALE`].
     pub(crate) fn text(&mut self, text: &str, x: i32, y: i32, color: u32) {
         let mut cursor = x;
         for character in text.chars() {
@@ -214,10 +224,12 @@ impl Canvas<'_> {
                 for (row, bits) in glyph.iter().enumerate() {
                     for column in 0..GLYPH_WIDTH {
                         if bits & (1 << (GLYPH_WIDTH - 1 - column)) != 0 {
+                            // Each lit cell is two units wide, which thickens
+                            // every vertical stroke to the bold weight.
                             self.rect(
                                 cursor + column * TEXT_SCALE,
                                 y + row as i32 * TEXT_SCALE,
-                                TEXT_SCALE,
+                                2 * TEXT_SCALE,
                                 TEXT_SCALE,
                                 color,
                             );
@@ -225,36 +237,158 @@ impl Canvas<'_> {
                     }
                 }
             }
-            cursor += (GLYPH_WIDTH + 1) * TEXT_SCALE;
+            cursor += GLYPH_ADVANCE;
         }
     }
 }
 
-pub(crate) const GLYPH_WIDTH: i32 = 3;
-pub(crate) const GLYPH_HEIGHT: i32 = 5;
-pub(crate) const TEXT_SCALE: i32 = 3;
+/// Columns and rows of the glyph design grid.
+pub(crate) const GLYPH_WIDTH: i32 = 5;
+pub(crate) const GLYPH_HEIGHT: i32 = 7;
+/// Screen pixels per grid cell.
+pub(crate) const TEXT_SCALE: i32 = 2;
+/// Distance between glyph origins: the design is one cell wider once bolded,
+/// plus one cell of space.
+pub(crate) const GLYPH_ADVANCE: i32 = (GLYPH_WIDTH + 2) * TEXT_SCALE;
 
-/// 3x5 bitmap glyphs for digits and `% . x X M A >`, one byte per row (low 3 bits
-/// used).
-fn glyph(character: char) -> Option<[u8; 5]> {
+/// Width in pixels of `text` as drawn by [`Canvas::text`] (no trailing space).
+pub(crate) fn text_width(text: &str) -> i32 {
+    text.chars().count() as i32 * GLYPH_ADVANCE - TEXT_SCALE
+}
+
+/// 5x7 bitmap glyphs for the digits, the capital letters, `x` and `% . > ' - +`, one byte per row (low 5
+/// bits used).
+fn glyph(character: char) -> Option<[u8; 7]> {
     Some(match character {
-        '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
-        '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
-        '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
-        '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
-        '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
-        '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
-        '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
-        '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
-        '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
-        '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
-        '%' => [0b101, 0b001, 0b010, 0b100, 0b101],
-        '.' => [0b000, 0b000, 0b000, 0b000, 0b010],
-        'x' => [0b000, 0b101, 0b010, 0b101, 0b000],
-        '>' => [0b100, 0b010, 0b001, 0b010, 0b100],
-        'X' => [0b101, 0b101, 0b010, 0b101, 0b101],
-        'M' => [0b101, 0b111, 0b111, 0b101, 0b101],
-        'A' => [0b010, 0b101, 0b111, 0b101, 0b101],
+        '0' => [
+            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+        ],
+        '1' => [
+            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        '2' => [
+            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+        ],
+        '3' => [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        '4' => [
+            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+        ],
+        '5' => [
+            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
+        ],
+        '6' => [
+            0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+        ],
+        '7' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+        ],
+        '8' => [
+            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+        ],
+        '9' => [
+            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
+        ],
+        '%' => [
+            0b11000, 0b11001, 0b00010, 0b00100, 0b01000, 0b10011, 0b00011,
+        ],
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100,
+        ],
+        'x' => [
+            0b00000, 0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001,
+        ],
+        '>' => [
+            0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000,
+        ],
+        'X' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
+        ],
+        'M' => [
+            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+        ],
+        'A' => [
+            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'C' => [
+            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+        ],
+        'E' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+        ],
+        'F' => [
+            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'H' => [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        'N' => [
+            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
+        ],
+        'O' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'S' => [
+            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+        ],
+        'T' => [
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'B' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+        ],
+        'D' => [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
+        'G' => [
+            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111,
+        ],
+        'I' => [
+            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+        ],
+        'J' => [
+            0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
+        ],
+        'K' => [
+            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+        ],
+        'L' => [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        'P' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+        ],
+        'Q' => [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+        ],
+        'R' => [
+            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+        ],
+        'U' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        'V' => [
+            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
+        ],
+        'W' => [
+            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010,
+        ],
+        'Y' => [
+            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+        ],
+        'Z' => [
+            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+        ],
+        '\'' => [
+            0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000,
+        ],
+        '-' => [
+            0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+        ],
+        '+' => [
+            0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000,
+        ],
         _ => return None,
     })
 }
@@ -343,5 +477,36 @@ mod tests {
         assert_eq!(buffer[10 * width + 20], 0);
         assert_eq!(buffer[20 * width + 20], 0);
         assert_eq!(buffer[20 * width + 10], 0);
+    }
+
+    #[test]
+    fn every_character_the_ui_prints_has_a_glyph() {
+        for character in "0123456789%.xXMA>CEFHNOSTBDGIJKLPQRUVWYZ'-+".chars() {
+            assert!(glyph(character).is_some(), "missing glyph {character:?}");
+        }
+        for letter in 'A'..='Z' {
+            assert!(glyph(letter).is_some(), "missing glyph {letter:?}");
+        }
+        assert!(glyph('?').is_none());
+    }
+
+    #[test]
+    fn text_width_matches_what_text_paints() {
+        let (width, height) = (200, 40);
+        for label in ["2X", "MAX", "100%", ">> 12.3x"] {
+            let mut buffer = vec![0u32; width * height];
+            Canvas::new(&mut buffer, width, height, 0).text(label, 10, 10, 1);
+            let columns: Vec<usize> = (0..width)
+                .filter(|x| (0..height).any(|y| buffer[y * width + x] != 0))
+                .collect();
+            let painted = (columns.last().unwrap() - columns.first().unwrap() + 1) as i32;
+            // Glyphs such as `>` leave their last column empty, so the
+            // painted extent may be a little narrower than the advance box.
+            assert!(painted <= text_width(label), "{label}: {painted}");
+            assert!(
+                painted > text_width(label) - GLYPH_ADVANCE,
+                "{label}: {painted}"
+            );
+        }
     }
 }

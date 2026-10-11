@@ -1,8 +1,9 @@
 //! Painting the dock over the game frame.
 
+use super::cheat_menu::MenuLayout;
 use super::layout::{DOCK_HEIGHT, DOCK_MARGIN, KNOB_RADIUS, Layout, TRACK_HEIGHT};
 use super::{Dock, SpeedSetting};
-use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, GLYPH_WIDTH, Rect, TEXT_SCALE};
+use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
 
 pub(super) const POWER_COLOR: u32 = 0x00D9_3B3B;
 pub(super) const POWER_SYMBOL_COLOR: u32 = 0x00FF_FFFF;
@@ -100,7 +101,7 @@ impl Dock {
             };
             canvas.rounded_rect(button, 9, fill, if selected { 1.0 } else { 0.55 });
             let label = setting.label();
-            let width = label.chars().count() as i32 * (GLYPH_WIDTH + 1) * TEXT_SCALE - TEXT_SCALE;
+            let width = text_width(label);
             canvas.text(
                 label,
                 button.x + (button.width - width) / 2,
@@ -108,6 +109,28 @@ impl Dock {
                 text,
             );
         }
+
+        // The CHEATS button (lit while its menu is open), at the left end.
+        let menu_open = self.menu.is_open();
+        canvas.rounded_rect(
+            layout.cheats,
+            9,
+            if menu_open { FILL_COLOR } else { TRACK_COLOR },
+            if menu_open { 1.0 } else { 0.55 },
+        );
+        canvas.text(
+            "CHEATS",
+            layout.cheats.x + (layout.cheats.width - text_width("CHEATS")) / 2,
+            layout.cheats.y + (layout.cheats.height - GLYPH_HEIGHT * TEXT_SCALE) / 2,
+            if menu_open { DOCK_COLOR } else { ICON_COLOR },
+        );
+        canvas.rect(
+            layout.cheats_divider_x,
+            layout.dock.y + 14,
+            2,
+            DOCK_HEIGHT - 28,
+            TRACK_COLOR,
+        );
 
         // Power (red) and restart (circular arrow), left of the volume.
         canvas.rounded_rect(layout.power, 9, POWER_COLOR, 1.0);
@@ -152,5 +175,14 @@ impl Dock {
             layout.text_y,
             ICON_COLOR,
         );
+
+        // The cheat menu opens above the dock and does not slide with it.
+        if self.menu.is_open() {
+            let mut menu_canvas = Canvas::new(buffer, width, height, 0);
+            self.menu.draw(
+                &mut menu_canvas,
+                &MenuLayout::new(width, layout.dock, self.menu.has_file_row()),
+            );
+        }
     }
 }

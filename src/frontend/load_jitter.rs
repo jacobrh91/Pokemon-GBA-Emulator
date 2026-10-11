@@ -86,6 +86,7 @@ pub(super) fn advance_frames(emulator: &mut Emulator, frames: u32) -> io::Result
         while !emulator.take_frame_ready() {
             emulator.step()?;
         }
+        emulator.apply_cheats();
     }
     // The audio belongs to frames the player never heard.
     let _ = emulator.take_audio_samples();

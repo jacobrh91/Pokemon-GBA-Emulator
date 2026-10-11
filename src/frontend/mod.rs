@@ -11,13 +11,14 @@ mod window_control;
 use audio_output::AudioOutput;
 use dock::{Dock, Pointer, SpeedSetting};
 use emulation_thread::{STATE_LOAD, STATE_LOADED, STATE_SAVE, STATE_SAVED, Shared, emulation_loop};
+use gba_emulator::cheats::Cheats;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::game_library;
 use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use gba_emulator::settings::Settings;
 use input::{
-    EscapeAction, LOAD_STATE_KEY, SAVE_STATE_KEY, buttons_from_keys, escape_action,
+    CHEAT_MENU_KEY, EscapeAction, LOAD_STATE_KEY, SAVE_STATE_KEY, buttons_from_keys, escape_action,
     fast_forward_held,
 };
 use minifb::{Key, MouseMode, Scale, ScaleMode, Window, WindowOptions};
@@ -40,6 +41,27 @@ const RESTORE_FULLSCREEN_AFTER_FRAMES: u32 = 3;
 pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     let mut emulator = Emulator::new(rom_path)?;
     emulator.initialize_gba_startup(ROM_START)?;
+    let cheats_path = Cheats::path_for_rom(Path::new(rom_path));
+    match Cheats::load(&cheats_path) {
+        Ok(cheats) => {
+            if cheats.write_count() > 0 || cheats.master_line_count() > 0 {
+                let when = match cheats.hook_address() {
+                    Some(address) => format!("when the game reaches {address:#010X}"),
+                    None => "every frame".to_owned(),
+                };
+                eprintln!(
+                    "cheats {}: {} code write(s), applied {when} once the \"CHEATS FILE\" row of the cheat menu (Tab) is ticked",
+                    cheats_path.display(),
+                    cheats.write_count(),
+                );
+            }
+            for warning in cheats.warnings() {
+                eprintln!("cheats {}: {warning}", cheats_path.display());
+            }
+            emulator.set_cheats(cheats);
+        }
+        Err(error) => eprintln!("could not read cheats {}: {error}", cheats_path.display()),
+    }
     if let Some(image) = game_library::read_save(save_path)? {
         emulator.load_save(&image);
         eprintln!("loaded save {}", save_path.display());
@@ -109,6 +131,12 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         }
     };
 
+    // What the cheats file holds, read before the emulator moves to its
+    // thread.
+    let file_wild_species = emulator.cheats().wild_species();
+    let file_codes = emulator.cheats().write_count() + emulator.cheats().master_line_count();
+    let wild_hook = emulator.wild_species_hook_address();
+
     let shared = Arc::new(Shared::new());
     shared
         .load_jitter_frames
@@ -123,7 +151,32 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
             .spawn(move || emulation_loop(emulator, sink, &shared, &save_path, &state_path))?
     };
 
+    // The cheats file's `wild_species` line preselects the menu's species
+    // (when none was saved); the row's checkbox is what turns it on.
+    let mut cheat_options = settings.cheat_options;
+    if cheat_options.wild_species.is_none()
+        && let Some(species) = file_wild_species
+    {
+        cheat_options.wild_species = Some(species);
+        let name = gba_emulator::species::name(species).unwrap_or("?");
+        match wild_hook {
+            Some(address) => eprintln!(
+                "cheats: the cheats file sets the wild species to {name} ({species}); tick its checkbox in the cheat menu (Tab) to use it (found CreateWildMon at {address:#010X})"
+            ),
+            None => eprintln!(
+                "cheats: the cheats file sets the wild species to {name}, but this ROM is not a FireRed build whose wild-encounter function can be found"
+            ),
+        }
+    }
     let mut dock = Dock::new(settings.volume);
+    dock.set_file_codes_available(file_codes);
+    dock.set_cheat_options(cheat_options);
+    shared.set_cheat_options(cheat_options);
+    if std::env::var_os("GBA_EMULATOR_SMOKE_UI").is_some() {
+        // Used by scripts/check_codegen.sh: show every piece of UI so the
+        // release binary's drawing code is exercised without a mouse.
+        dock.open_everything_for_smoke_test();
+    }
     dock.set_muted(settings.muted);
     dock.set_speed(SpeedSetting::from_multiple(settings.fast_forward));
     let mut restore_fullscreen = settings.fullscreen;
@@ -138,10 +191,18 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     while window.is_open() && shared.running.load(Ordering::Relaxed) {
         // Escape leaves full screen first; only from a window does it quit.
         let escape = window.is_key_pressed(Key::Escape, minifb::KeyRepeat::No);
-        match escape_action(escape, window_control::is_fullscreen(&window)) {
-            EscapeAction::None => {}
-            EscapeAction::LeaveFullscreen => window_control::toggle_fullscreen(&window),
-            EscapeAction::Quit => break,
+        if escape && dock.menu_open() {
+            // An open cheat menu takes Escape first.
+            dock.close_menu();
+        } else {
+            match escape_action(escape, window_control::is_fullscreen(&window)) {
+                EscapeAction::None => {}
+                EscapeAction::LeaveFullscreen => window_control::toggle_fullscreen(&window),
+                EscapeAction::Quit => break,
+            }
+        }
+        if window.is_key_pressed(CHEAT_MENU_KEY, minifb::KeyRepeat::No) {
+            dock.toggle_menu();
         }
         if window.is_key_pressed(SAVE_STATE_KEY, minifb::KeyRepeat::No) {
             shared.state_request.store(STATE_SAVE, Ordering::Relaxed);
@@ -194,6 +255,9 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
             scroll: window.get_scroll_wheel().map_or(0.0, |(_, y)| y),
         };
         dock.update(pointer, WINDOW_WIDTH, WINDOW_HEIGHT);
+        if let Some(options) = dock.take_cheat_options_change() {
+            shared.set_cheat_options(options);
+        }
 
         // Show the floppy-disk icon for a moment after a state is saved or
         // restored (the emulation thread reports completed operations).
@@ -248,6 +312,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
             dock.speed().multiple(),
             window_control::is_fullscreen(&window),
             Some(window_control::content_size(&window)),
+            dock.cheat_options(),
         );
         if let Err(error) = window.update_with_buffer(&display_buffer, WINDOW_WIDTH, WINDOW_HEIGHT)
         {
@@ -265,7 +330,10 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
     result
 }
 
-/// Nearest-neighbour upscale of the 240x160 frame to the window buffer.
+/// Nearest-neighbour upscale of the 240x160 frame to the window buffer. Kept
+/// out of line like the drawing primitives (see `draw.rs`): constant window
+/// dimensions inlined into `run` have tripped an arm64 miscompile.
+#[inline(never)]
 fn upscale(framebuffer: &[u32], output: &mut [u32]) {
     for (y, row) in framebuffer.chunks_exact(SCREEN_WIDTH).enumerate() {
         let first = y * DISPLAY_SCALE * WINDOW_WIDTH;

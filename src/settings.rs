@@ -6,7 +6,9 @@
 //! setting), so an old or hand-edited file never prevents a game from
 //! starting.
 
+use crate::cheat_options::{CheatOptions, MAX_LEVEL, PerfectTarget};
 use crate::game_library;
+use crate::species;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -38,6 +40,8 @@ pub struct Settings {
     /// Upper bound of the random number of extra frames run after loading a
     /// save state; 0 replays states exactly.
     pub state_jitter_frames: u32,
+    /// The cheat menu's options, restored the next time the game is played.
+    pub cheat_options: CheatOptions,
 }
 
 impl Default for Settings {
@@ -49,6 +53,7 @@ impl Default for Settings {
             window_size: None,
             fast_forward: None,
             state_jitter_frames: DEFAULT_STATE_JITTER_FRAMES,
+            cheat_options: CheatOptions::default(),
         }
     }
 }
@@ -77,6 +82,12 @@ impl Settings {
     pub fn parse(text: &str) -> Self {
         let mut settings = Self::default();
         let (mut width, mut height) = (None, None);
+        // Settings from before each row had its own switch: a saved species
+        // or level was active, and so were saved perfect-stats targets.
+        let (mut wild_switch_seen, mut perfect_switch_seen) = (false, false);
+        // The perfect-stats target was two flags before it became one choice
+        // of wild / opponents / both; old files are read into that choice.
+        let (mut legacy_wild, mut legacy_opponents, mut target_seen) = (false, false, false);
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
             let Some((key, value)) = line.split_once('=') else {
@@ -106,6 +117,41 @@ impl Settings {
                         settings.state_jitter_frames = frames.min(MAX_STATE_JITTER_FRAMES);
                     }
                 }
+                "cheat_shiny" => set_flag(value, &mut settings.cheat_options.shiny),
+                "cheat_perfect_target" => {
+                    if let Some(target) = PerfectTarget::from_key(value) {
+                        settings.cheat_options.perfect_target = target;
+                        target_seen = true;
+                    }
+                }
+                "cheat_perfect_wild" => set_flag(value, &mut legacy_wild),
+                "cheat_perfect_opponent" => set_flag(value, &mut legacy_opponents),
+                "cheat_infinite_money" => {
+                    set_flag(value, &mut settings.cheat_options.infinite_money)
+                }
+                "cheat_catch_always" => set_flag(value, &mut settings.cheat_options.catch_always),
+                "cheat_exp_boost" => set_flag(value, &mut settings.cheat_options.exp_boost),
+                "cheat_wild_enabled" => {
+                    wild_switch_seen = true;
+                    set_flag(value, &mut settings.cheat_options.wild_enabled);
+                }
+                "cheat_perfect_enabled" => {
+                    perfect_switch_seen = true;
+                    set_flag(value, &mut settings.cheat_options.perfect_enabled);
+                }
+                "cheat_wild_species" => {
+                    // `any` (or empty) is the default.
+                    if let Some(number) = species::parse(value) {
+                        settings.cheat_options.wild_species = Some(number);
+                    }
+                }
+                "cheat_wild_level" => {
+                    if let Ok(level) = value.parse::<u8>()
+                        && (1..=MAX_LEVEL).contains(&level)
+                    {
+                        settings.cheat_options.wild_level = Some(level);
+                    }
+                }
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -118,6 +164,20 @@ impl Settings {
                 _ => {}
             }
         }
+        let options = &mut settings.cheat_options;
+        if !wild_switch_seen {
+            options.wild_enabled = options.wild_species.is_some() || options.wild_level.is_some();
+        }
+        if !target_seen {
+            options.perfect_target = match (legacy_wild, legacy_opponents) {
+                (true, true) => PerfectTarget::Both,
+                (false, true) => PerfectTarget::Opponents,
+                _ => PerfectTarget::Wild,
+            };
+        }
+        if !perfect_switch_seen {
+            options.perfect_enabled = legacy_wild || legacy_opponents || target_seen;
+        }
         if let (Some(width), Some(height)) = (width, height)
             && (MIN_WINDOW_WIDTH..=MAX_WINDOW_WIDTH).contains(&width)
             && height > 0
@@ -125,6 +185,46 @@ impl Settings {
             settings.window_size = Some((width, height));
         }
         settings
+    }
+
+    /// The cheat menu's options as settings lines. Only options that differ
+    /// from the default are written, so a file without cheats stays short.
+    fn cheat_options_text(&self) -> String {
+        let options = &self.cheat_options;
+        let mut text = String::new();
+        let mut flag = |key: &str, on: bool| {
+            if on {
+                text.push_str(&format!("{key} = true\n"));
+            }
+        };
+        flag("cheat_shiny", options.shiny);
+
+        flag("cheat_infinite_money", options.infinite_money);
+        flag("cheat_catch_always", options.catch_always);
+        flag("cheat_exp_boost", options.exp_boost);
+        // A row's switch is written whenever the row holds choices, even when
+        // it is off: a missing switch means "a file from before the switches",
+        // which reads saved choices as on.
+        if options.wild_enabled || options.wild_species.is_some() || options.wild_level.is_some() {
+            text.push_str(&format!("cheat_wild_enabled = {}\n", options.wild_enabled));
+        }
+        if options.perfect_enabled || options.perfect_target != PerfectTarget::default() {
+            text.push_str(&format!(
+                "cheat_perfect_enabled = {}\n",
+                options.perfect_enabled
+            ));
+            text.push_str(&format!(
+                "cheat_perfect_target = {}\n",
+                options.perfect_target.key()
+            ));
+        }
+        if let Some(number) = options.wild_species {
+            text.push_str(&format!("cheat_wild_species = {number}\n"));
+        }
+        if let Some(level) = options.wild_level {
+            text.push_str(&format!("cheat_wild_level = {level}\n"));
+        }
+        text
     }
 
     pub fn to_text(&self) -> String {
@@ -147,7 +247,14 @@ impl Settings {
             "state_jitter_frames = {}\n",
             self.state_jitter_frames
         ));
+        text.push_str(&self.cheat_options_text());
         text
+    }
+}
+
+fn set_flag(value: &str, target: &mut bool) {
+    if let Ok(flag) = value.parse() {
+        *target = flag;
     }
 }
 
@@ -164,6 +271,15 @@ mod tests {
             window_size: Some((1200, 800)),
             fast_forward: Some(4),
             state_jitter_frames: 12,
+            cheat_options: CheatOptions {
+                shiny: true,
+                wild_species: Some(147),
+                wild_level: Some(50),
+                perfect_target: PerfectTarget::Both,
+                perfect_enabled: true,
+                infinite_money: true,
+                ..CheatOptions::default()
+            },
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
         assert_eq!(
@@ -209,6 +325,159 @@ window_height = 50
         assert_eq!(
             Settings::parse("state_jitter_frames = lots").state_jitter_frames,
             DEFAULT_STATE_JITTER_FRAMES
+        );
+    }
+
+    #[test]
+    fn cheat_menu_options_are_persisted_and_default_to_off() {
+        assert!(Settings::default().cheat_options.is_default());
+        let text = Settings {
+            cheat_options: CheatOptions {
+                wild_species: Some(25),
+                perfect_target: PerfectTarget::Opponents,
+                perfect_enabled: true,
+                catch_always: true,
+                exp_boost: true,
+                ..CheatOptions::default()
+            },
+            ..Settings::default()
+        }
+        .to_text();
+        assert!(text.contains("cheat_wild_species = 25"));
+        assert!(text.contains("cheat_catch_always = true"));
+        assert!(text.contains("cheat_exp_boost = true"));
+        assert!(!text.contains("cheat_shiny"), "defaults are not written");
+        assert!(!text.contains("cheat_wild_level"));
+        let back = Settings::parse(&text).cheat_options;
+        assert_eq!(back.wild_species, Some(25));
+        assert_eq!(back.wild_level, None);
+        assert_eq!(back.perfect_target, PerfectTarget::Opponents);
+        assert!(back.perfect_enabled && back.catch_always && back.exp_boost);
+        assert!(!back.shiny && !back.infinite_money);
+    }
+
+    #[test]
+    fn the_row_switches_are_saved_and_older_files_keep_their_choices_active() {
+        // A row can be off while its choices are remembered.
+        let off = Settings {
+            cheat_options: CheatOptions {
+                wild_species: Some(147),
+                wild_enabled: false,
+                perfect_target: PerfectTarget::Both,
+                perfect_enabled: false,
+                ..CheatOptions::default()
+            },
+            ..Settings::default()
+        };
+        let back = Settings::parse(&off.to_text()).cheat_options;
+        assert_eq!(back.wild_species, Some(147));
+        assert!(!back.wild_enabled);
+        assert_eq!(back.perfect_target, PerfectTarget::Both);
+        assert!(!back.perfect_enabled);
+        // ...and on.
+        let on = Settings {
+            cheat_options: CheatOptions {
+                wild_species: Some(147),
+                wild_enabled: true,
+                perfect_target: PerfectTarget::Opponents,
+                perfect_enabled: true,
+                ..CheatOptions::default()
+            },
+            ..Settings::default()
+        };
+        let back = Settings::parse(&on.to_text()).cheat_options;
+        assert!(back.wild_enabled && back.perfect_enabled);
+        // A file written before the switches existed: saved choices were
+        // active, so they stay active.
+        let legacy = Settings::parse("cheat_wild_species = 25\ncheat_perfect_wild = true\n");
+        assert!(legacy.cheat_options.wild_enabled);
+        assert!(legacy.cheat_options.perfect_enabled);
+        // With nothing saved, nothing is on.
+        let none = Settings::parse("volume = 0.5\n");
+        assert!(!none.cheat_options.wild_enabled && !none.cheat_options.perfect_enabled);
+    }
+
+    #[test]
+    fn the_cheats_file_switch_is_never_saved() {
+        let settings = Settings {
+            cheat_options: CheatOptions {
+                file_codes: true,
+                ..CheatOptions::default()
+            },
+            ..Settings::default()
+        };
+        assert!(!settings.to_text().contains("file"));
+        assert!(
+            !Settings::parse(&settings.to_text())
+                .cheat_options
+                .file_codes
+        );
+        assert!(
+            !Settings::parse("cheat_file_codes = true")
+                .cheat_options
+                .file_codes
+        );
+    }
+
+    #[test]
+    fn a_settings_file_from_before_my_pokemon_was_removed_still_loads() {
+        let old = "volume = 0.5\ncheat_perfect_mine = true\ncheat_perfect_wild = true\n";
+        let settings = Settings::parse(old);
+        assert_eq!(settings.volume, 0.5);
+        assert_eq!(settings.cheat_options.perfect_target, PerfectTarget::Wild);
+        assert!(settings.cheat_options.perfect_enabled);
+        assert!(!settings.to_text().contains("perfect_mine"));
+    }
+
+    #[test]
+    fn the_two_old_target_flags_read_into_the_single_choice() {
+        let target = |text: &str| Settings::parse(text).cheat_options;
+        let both = target("cheat_perfect_wild = true\ncheat_perfect_opponent = true\n");
+        assert_eq!(both.perfect_target, PerfectTarget::Both);
+        assert!(both.perfect_enabled, "saved targets were active");
+        let opponents = target("cheat_perfect_opponent = true\n");
+        assert_eq!(opponents.perfect_target, PerfectTarget::Opponents);
+        let wild = target("cheat_perfect_wild = true\n");
+        assert_eq!(wild.perfect_target, PerfectTarget::Wild);
+        // The new key wins over old flags left in the same file.
+        let new = target("cheat_perfect_wild = true\ncheat_perfect_target = opponents\n");
+        assert_eq!(new.perfect_target, PerfectTarget::Opponents);
+        // The choice is written as a word and read back.
+        let written = Settings {
+            cheat_options: CheatOptions {
+                perfect_target: PerfectTarget::Both,
+                perfect_enabled: true,
+                ..CheatOptions::default()
+            },
+            ..Settings::default()
+        }
+        .to_text();
+        assert!(written.contains("cheat_perfect_target = both"));
+        assert!(!written.contains("cheat_perfect_wild"));
+        // A bad word is ignored.
+        let bad = target("cheat_perfect_target = everyone\n");
+        assert_eq!(bad.perfect_target, PerfectTarget::Wild);
+        assert!(!bad.perfect_enabled);
+    }
+
+    #[test]
+    fn bad_cheat_menu_values_fall_back_to_off() {
+        let s = Settings::parse(
+            "cheat_wild_species = Missingno\ncheat_wild_level = 500\ncheat_shiny = maybe\ncheat_wild_level = 0\n",
+        );
+        assert!(s.cheat_options.is_default());
+        // A name is as good as a number for the species.
+        assert_eq!(
+            Settings::parse("cheat_wild_species = Dratini")
+                .cheat_options
+                .wild_species,
+            Some(147)
+        );
+        assert_eq!(
+            Settings::parse("cheat_wild_level = 100")
+                .cheat_options
+                .wild_level,
+            Some(100)
         );
     }
 

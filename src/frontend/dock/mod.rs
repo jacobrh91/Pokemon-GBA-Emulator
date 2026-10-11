@@ -5,10 +5,13 @@
 //! Interaction logic ([`Dock::update`]) is separate from drawing
 //! ([`Dock::draw`], in `draw.rs`) so it can be unit tested without a window.
 
+mod cheat_menu;
 mod draw;
 mod layout;
 mod speed;
 
+use cheat_menu::{CheatMenu, MenuLayout};
+use gba_emulator::cheat_options::CheatOptions;
 use layout::{KNOB_RADIUS, Layout};
 pub use speed::SpeedSetting;
 
@@ -43,6 +46,7 @@ pub struct Dock {
     restart_requested: bool,
     quit_requested: bool,
     fullscreen_requested: bool,
+    menu: CheatMenu,
 }
 
 impl Dock {
@@ -59,7 +63,53 @@ impl Dock {
             restart_requested: false,
             quit_requested: false,
             fullscreen_requested: false,
+            menu: CheatMenu::new(),
         }
+    }
+
+    /// The cheat menu's current options.
+    pub fn cheat_options(&self) -> CheatOptions {
+        self.menu.options()
+    }
+
+    /// Restores the cheat menu's options (from saved settings).
+    pub fn set_cheat_options(&mut self, options: CheatOptions) {
+        self.menu.set_options(options);
+    }
+
+    /// The options, once after they were changed in the menu.
+    pub fn take_cheat_options_change(&mut self) -> Option<CheatOptions> {
+        self.menu.take_changed().then(|| self.menu.options())
+    }
+
+    /// Whether the cheat menu is open.
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_open()
+    }
+
+    /// Opens or closes the cheat menu (Tab, like its dock button).
+    pub fn toggle_menu(&mut self) {
+        self.menu.toggle();
+    }
+
+    /// Tells the dock how many codes the cheats file holds; the cheat menu
+    /// has a row for switching them on only when there are some.
+    pub fn set_file_codes_available(&mut self, count: usize) {
+        self.menu.set_file_codes_available(count);
+    }
+
+    /// Closes the cheat menu (Escape).
+    pub fn close_menu(&mut self) {
+        self.menu.close();
+    }
+
+    /// Shows the dock with the cheat menu and its species list open, without
+    /// needing a mouse. For the launch smoke test (`scripts/check_codegen.sh`),
+    /// which has to exercise the drawing code of the real binary.
+    pub fn open_everything_for_smoke_test(&mut self) {
+        self.reveal = 1.0;
+        self.menu.open_dropdown();
+        self.menu.open_perfect_list_for_smoke_test();
     }
 
     /// True once per click of the full-screen button.
@@ -132,7 +182,11 @@ impl Dock {
             .is_some_and(|(_, y)| y >= height as f32 - HOVER_ZONE);
         let active = pointer.position.is_some()
             && (in_hover_zone || self.idle_frames < HIDE_AFTER_IDLE_FRAMES);
-        let target = if active || self.dragging { 1.0 } else { 0.0 };
+        let target = if active || self.dragging || self.menu.is_open() {
+            1.0
+        } else {
+            0.0
+        };
         let delta: f32 = target - self.reveal;
         self.reveal = (self.reveal + delta.clamp(-REVEAL_STEP, REVEAL_STEP)).clamp(0.0, 1.0);
 
@@ -147,8 +201,19 @@ impl Dock {
             return;
         }
         if let Some((x, y)) = pointer.position {
-            if pressed {
-                if layout.power.contains(x, y) {
+            // The menu sits above the dock; a click on it is not also a click
+            // on whatever is underneath.
+            let menu_layout = MenuLayout::new(width, layout.dock, self.menu.has_file_row());
+            let over_menu = self.menu.update(pointer, pressed, &menu_layout);
+            if pressed && !over_menu {
+                if self.menu.is_open() && !layout.cheats.contains(x, y) {
+                    // Clicking anywhere else dismisses the menu, and still
+                    // reaches the control that was clicked.
+                    self.menu.close();
+                }
+                if layout.cheats.contains(x, y) {
+                    self.menu.toggle();
+                } else if layout.power.contains(x, y) {
                     self.quit_requested = true;
                 } else if layout.restart.contains(x, y) {
                     self.restart_requested = true;
