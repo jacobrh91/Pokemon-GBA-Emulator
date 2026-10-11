@@ -9,6 +9,41 @@
 /// Highest level the game allows.
 pub const MAX_LEVEL: u8 = 100;
 
+/// How often the shiny cheat makes a Pokémon shiny: one in N, chosen from a
+/// short ladder from every Pokémon (1/1) to one in a thousand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShinyOdds(u8);
+
+impl ShinyOdds {
+    /// The values of N, from the most to the least often.
+    pub const ONE_IN: [u32; 9] = [1, 2, 5, 10, 25, 50, 100, 500, 1000];
+
+    /// N, as in "one in N".
+    pub fn one_in(self) -> u32 {
+        Self::ONE_IN[usize::from(self.0).min(Self::ONE_IN.len() - 1)]
+    }
+
+    /// The menu's text: `1/10`.
+    pub fn label(self) -> String {
+        format!("1/{}", self.one_in())
+    }
+
+    /// The step `delta` along the ladder, stopping at its ends. A positive
+    /// `delta` makes shiny Pokémon more common.
+    pub fn stepped(self, delta: i32) -> Self {
+        let last = Self::ONE_IN.len() as i32 - 1;
+        Self((i32::from(self.0) - delta).clamp(0, last) as u8)
+    }
+
+    /// The setting for exactly one in `one_in`, if it is on the ladder.
+    pub fn from_one_in(one_in: u32) -> Option<Self> {
+        Self::ONE_IN
+            .iter()
+            .position(|n| *n == one_in)
+            .map(|index| Self(index as u8))
+    }
+}
+
 /// Whose Pokémon the perfect-stats cheat applies to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PerfectTarget {
@@ -64,8 +99,10 @@ impl PerfectTarget {
 /// so that a row can be turned off without losing what was chosen in it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CheatOptions {
-    /// Every Pokémon is shiny (FireRed).
+    /// Pokémon are made shiny (FireRed), at the chance `shiny_odds`.
     pub shiny: bool,
+    /// How often. Remembered while the row is off.
+    pub shiny_odds: ShinyOdds,
     /// Switch of the wild-encounter row. While off, `wild_species` and
     /// `wild_level` are remembered but do nothing.
     pub wild_enabled: bool,
@@ -218,6 +255,30 @@ mod tests {
         options.wild_enabled = false;
         assert_eq!(options.wild_species, Some(147), "the choice is kept");
         assert_eq!(options.active_wild_species(), None);
+    }
+
+    #[test]
+    fn shiny_odds_step_along_the_ladder_and_stop_at_its_ends() {
+        let all = ShinyOdds::default();
+        assert_eq!(all.one_in(), 1, "every Pokémon by default");
+        assert_eq!(all.label(), "1/1");
+        assert_eq!(all.stepped(1), all, "already the most often");
+        let mut odds = all;
+        let mut seen = vec![odds.one_in()];
+        for _ in 0..20 {
+            odds = odds.stepped(-1);
+            if seen.last() != Some(&odds.one_in()) {
+                seen.push(odds.one_in());
+            }
+        }
+        assert_eq!(seen, ShinyOdds::ONE_IN);
+        assert_eq!(odds.label(), "1/1000", "stops at the rarest");
+        assert_eq!(odds.stepped(1).one_in(), 500, "up is more often");
+        assert_eq!(
+            ShinyOdds::from_one_in(100).map(ShinyOdds::one_in),
+            Some(100)
+        );
+        assert_eq!(ShinyOdds::from_one_in(7), None);
     }
 
     #[test]

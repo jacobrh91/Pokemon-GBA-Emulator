@@ -99,6 +99,24 @@ pub fn find(rom: &[u8]) -> Option<u32> {
     find_in_firered(rom, &pattern, HOOK_OFFSET)
 }
 
+/// Whether the Pokémon with this personality value and OT ID is among the
+/// one in `one_in` that the cheat makes shiny. The decision is a hash of the
+/// two values, which the game drew at random, so it is evenly spread, needs
+/// no random numbers of the emulator's own (and none of the game's, which
+/// would change what the game does next), and gives the same answer for the
+/// same Pokémon. `one_in` of 1 (or 0) is every Pokémon.
+pub fn chosen(personality: u32, ot_id: u32, one_in: u32) -> bool {
+    if one_in <= 1 {
+        return true;
+    }
+    let mut x = personality ^ ot_id.rotate_left(16);
+    x = x.wrapping_add(0x9E37_79B9);
+    x = (x ^ (x >> 16)).wrapping_mul(0x85EB_CA6B);
+    x = (x ^ (x >> 13)).wrapping_mul(0xC2B2_AE35);
+    x ^= x >> 16;
+    x.is_multiple_of(one_in)
+}
+
 /// Whether a Pokémon with this personality value and OT ID is shiny.
 pub fn is_shiny(personality: u32, ot_id: u32) -> bool {
     shiny_sum(personality, ot_id) < SHINY_ODDS
@@ -148,6 +166,31 @@ pub fn shiny_personality(personality: u32, ot_id: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_chance_picks_about_one_in_n_and_one_is_every_pokemon() {
+        let mut seed = 0xCAFE_F00D_u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+        let samples: Vec<(u32, u32)> = (0..100_000).map(|_| (next(), next())).collect();
+        for one_in in [1u32, 2, 10, 100] {
+            let chosen = samples
+                .iter()
+                .filter(|(personality, ot_id)| chosen(*personality, *ot_id, one_in))
+                .count();
+            let expected = samples.len() as f64 / f64::from(one_in);
+            let spread = expected.sqrt() * 5.0 + 1.0;
+            assert!(
+                (chosen as f64 - expected).abs() <= spread,
+                "1/{one_in}: {chosen} chosen, expected about {expected}"
+            );
+        }
+        assert!(chosen(1, 2, 0) && chosen(1, 2, 1), "0 and 1 mean all");
+        // The same Pokémon always gets the same answer.
+        assert_eq!(chosen(0x1234, 0x5678, 7), chosen(0x1234, 0x5678, 7));
+    }
 
     #[test]
     fn a_shiny_personality_is_shiny_and_keeps_gender_ability_and_nature() {

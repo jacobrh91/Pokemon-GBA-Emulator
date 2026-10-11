@@ -13,7 +13,7 @@
 //! | infinite money | |
 //! | 100% catch rate | |
 //! | all experience is boosted | |
-//! | all Pokémon are shiny | |
+//! | shiny chance 1/1 … 1/1000 | stepper (- value +) |
 //! | no random encounters | |
 //! | TMs are infinitely usable | none: always on, shown ticked |
 //!
@@ -193,6 +193,11 @@ pub(super) struct MenuLayout {
     pub(super) catch: Rect,
     pub(super) exp_boost: Rect,
     pub(super) shiny: Rect,
+    /// The shiny row's chance: label, then - value +.
+    pub(super) shiny_label: (i32, i32),
+    pub(super) shiny_minus: Rect,
+    pub(super) shiny_value: Rect,
+    pub(super) shiny_plus: Rect,
     pub(super) no_encounters: Rect,
     /// Last in the list: a cheat that is always on, so its box is only shown.
     pub(super) always_on: Rect,
@@ -279,6 +284,27 @@ impl MenuLayout {
             height: CONTROL_HEIGHT,
         };
 
+        // Shiny: its label, then the chance as a stepper.
+        let shiny_label = (left + LEAD, row_shiny - text_h / 2);
+        let shiny_minus = Rect {
+            x: shiny_label.0 + text_width("SHINY CHANCE") + 14,
+            y: row_shiny - CONTROL_HEIGHT / 2,
+            width: CONTROL_HEIGHT,
+            height: CONTROL_HEIGHT,
+        };
+        let shiny_value = Rect {
+            x: shiny_minus.x + shiny_minus.width + 4,
+            y: shiny_minus.y,
+            width: text_width("1/1000") + 24,
+            height: CONTROL_HEIGHT,
+        };
+        let shiny_plus = Rect {
+            x: shiny_value.x + shiny_value.width + 4,
+            y: shiny_minus.y,
+            width: CONTROL_HEIGHT,
+            height: CONTROL_HEIGHT,
+        };
+
         Self {
             panel,
             title_y: y + 20,
@@ -304,6 +330,10 @@ impl MenuLayout {
             catch: checkbox_at(left, row_catch),
             exp_boost: checkbox_at(left, row_exp),
             shiny: checkbox_at(left, row_shiny),
+            shiny_label,
+            shiny_minus,
+            shiny_value,
+            shiny_plus,
             no_encounters: checkbox_at(left, row_no_encounters),
             always_on: checkbox_at(left, row_always_on),
             list: Rect {
@@ -506,6 +536,10 @@ impl CheatMenu {
                         let next = (at as i32 + delta).rem_euclid(all.len() as i32);
                         options.perfect_target = all[next as usize];
                     }
+                    // Right is more often, as the + button is.
+                    FocusRow::Shiny => {
+                        options.shiny_odds = options.shiny_odds.stepped(delta);
+                    }
                     _ => {}
                 }
             }
@@ -674,6 +708,9 @@ impl CheatMenu {
         if options.perfect_target != old.perfect_target {
             options.perfect_enabled = true;
         }
+        if options.shiny_odds != old.shiny_odds {
+            options.shiny = true;
+        }
         if options != old {
             self.options = options;
             self.changed = true;
@@ -735,6 +772,10 @@ impl CheatMenu {
         if pressed && over_panel {
             if layout.shiny.inflated(4).contains(x, y) {
                 options.shiny = !options.shiny;
+            } else if layout.shiny_minus.contains(x, y) {
+                options.shiny_odds = options.shiny_odds.stepped(-1);
+            } else if layout.shiny_plus.contains(x, y) {
+                options.shiny_odds = options.shiny_odds.stepped(1);
             } else if layout.no_encounters.inflated(4).contains(x, y) {
                 options.no_encounters = !options.no_encounters;
             } else if layout

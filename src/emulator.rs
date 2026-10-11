@@ -80,6 +80,8 @@ pub struct Emulator {
     tm_use_b: Option<u32>,
     /// Which of those cheats are on.
     make_shiny: bool,
+    /// With `make_shiny`: one Pokémon in this many is made shiny.
+    shiny_one_in: u32,
     perfect_wild: bool,
     perfect_opponents: bool,
     /// Entry of `CreateWildMon` while a perfect-stats row needs to know when
@@ -146,6 +148,7 @@ impl Emulator {
             tm_use_a,
             tm_use_b,
             make_shiny: false,
+            shiny_one_in: 1,
             perfect_wild: false,
             perfect_opponents: false,
             wild_scope_hook: NO_HOOK,
@@ -326,7 +329,7 @@ impl Emulator {
         ) else {
             return;
         };
-        if species == shiny::UNOWN {
+        if species == shiny::UNOWN || !shiny::chosen(personality, ot_id, self.shiny_one_in) {
             return;
         }
         let shiny = shiny::shiny_personality(personality, ot_id);
@@ -496,6 +499,7 @@ impl Emulator {
         // built. The perfect-stats row for wild Pokémon also watches
         // `CreateWildMon`, to tell wild ones from the rest.
         self.make_shiny = self.cheat_options.shiny;
+        self.shiny_one_in = self.cheat_options.shiny_odds.one_in();
         self.perfect_wild = self.cheat_options.perfect_for_wild();
         self.perfect_opponents = self.cheat_options.perfect_for_opponents();
         let building = self.make_shiny || self.perfect_wild || self.perfect_opponents;

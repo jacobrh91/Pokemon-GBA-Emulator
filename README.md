@@ -63,7 +63,7 @@ game is played.
 | Infinite money | | **active** (FireRed) |
 | 100% catch rate | | **active** (FireRed) |
 | All experience is boosted | | **active** (FireRed); every Pokémon counts as traded (×1.5) |
-| All Pokémon are shiny | | **active** (FireRed) |
+| Shiny chance | `-` / `+` steps 1/1, 1/2, 1/5, 1/10, 1/25, 1/50, 1/100, 1/500, 1/1000 (1/1 makes every Pokémon shiny, the default); Left / Right from the keyboard | **active** (FireRed) |
 | No random encounters | | **active** (FireRed) |
 | TMs are infinitely usable | | **always on** (FireRed): shown ticked at the bottom, with no switch |
 
@@ -245,7 +245,7 @@ the grass state starts a trainer battle): the trainer's two Pokémon have IVs of
 0 without the cheat and `[31, 31, 31, 31, 31, 31]` with the target set to
 opponents or both, and are unchanged with it set to wild only.
 
-### All Pokémon are shiny (Pokémon FireRed)
+### Shiny chance (Pokémon FireRed)
 
 In generation III a Pokémon is shiny when `OT ID high ^ OT ID low ^ PID high ^
 PID low` is below 8; shininess is not stored, it follows from the personality
@@ -254,7 +254,10 @@ Pokémon, draws the PID and picks the OT ID; with the row switched on the
 emulator stops just after both are known and rewrites the PID so the sum is
 below 8. The OT ID is left alone (the player's Pokémon stay the player's), and
 the new PID keeps the low byte (gender, ability slot) and `PID % 25` (nature),
-so only the colours change. Unown is skipped: its letter is made of the PID's
+so only the colours change. Which Pokémon are changed is the chance chosen in the
+row, one in 1 to one in 1000: the decision is a hash of the PID and OT ID the game
+drew, so it needs no random numbers of its own and does not disturb the game's.
+Unown is skipped: its letter is made of the PID's
 low bits. It applies to every Pokémon the game creates from then on (wild,
 trainers', gifts, eggs), not to ones already in the party or boxes. The place
 is found by a signature scan like the others (`src/cheats/firered/shiny.rs`).

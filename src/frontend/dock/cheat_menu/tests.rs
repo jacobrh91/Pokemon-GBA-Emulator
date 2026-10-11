@@ -1,6 +1,6 @@
 use super::*;
 use crate::frontend::draw::Canvas;
-use gba_emulator::cheats::options::CheatOptions;
+use gba_emulator::cheats::options::{CheatOptions, ShinyOdds};
 use std::time::{Duration, Instant};
 
 const WIDTH: usize = 960;
@@ -598,7 +598,8 @@ fn every_label_the_menu_draws_has_a_glyph() {
     let mut labels: Vec<String> = [
         "CHEATS",
         "ALL EXPERIENCE IS BOOSTED",
-        "ALL POKEMON ARE SHINY",
+        "SHINY CHANCE",
+        "1/1000",
         "WILD POKEMON IS",
         "AT LEVEL",
         "PERFECT STATS FOR",
@@ -639,6 +640,7 @@ fn drawing_every_state_stays_inside_the_window() {
                 wild_enabled: true,
                 perfect_enabled: true,
                 shiny: true,
+                shiny_odds: ShinyOdds::from_one_in(1000).unwrap(),
                 wild_species: Some(147),
                 wild_level: Some(100),
                 perfect_target: PerfectTarget::Opponents,
@@ -1161,4 +1163,44 @@ fn holding_a_does_nothing_off_the_level_buttons() {
         menu.hold_toggle(true, start + Duration::from_millis(frame * 16));
     }
     assert!(menu.options().is_default());
+}
+
+#[test]
+fn the_shiny_chance_steps_with_the_mouse_and_switches_the_row_on() {
+    let layout = layout();
+    let mut menu = open_menu();
+    assert_eq!(menu.options().shiny_odds.one_in(), 1);
+    // + at the most often does nothing; - steps to the next, 1/2.
+    click(&mut menu, &layout, centre(layout.shiny_plus));
+    assert_eq!(menu.options().shiny_odds.one_in(), 1);
+    assert!(!menu.options().shiny, "no change, so no switch");
+    click(&mut menu, &layout, centre(layout.shiny_minus));
+    assert_eq!(menu.options().shiny_odds.one_in(), 2);
+    assert!(menu.options().shiny, "choosing a chance switches it on");
+    click(&mut menu, &layout, centre(layout.shiny_minus));
+    click(&mut menu, &layout, centre(layout.shiny_minus));
+    assert_eq!(menu.options().shiny_odds.one_in(), 10);
+    click(&mut menu, &layout, centre(layout.shiny_plus));
+    assert_eq!(menu.options().shiny_odds.one_in(), 5);
+    // Unticking keeps the chance.
+    click(&mut menu, &layout, centre(layout.shiny));
+    assert!(!menu.options().shiny);
+    assert_eq!(menu.options().shiny_odds.one_in(), 5);
+}
+
+#[test]
+fn left_and_right_step_the_shiny_chance_on_its_row() {
+    let mut menu = open_menu();
+    // The first key shows the focus; then walk down to the shiny row.
+    menu.navigate(MenuNav::Down);
+    while menu.focused_row() != Some(FocusRow::Shiny) {
+        menu.navigate(MenuNav::Down);
+    }
+    menu.navigate(MenuNav::Left);
+    menu.navigate(MenuNav::Left);
+    menu.navigate(MenuNav::Left);
+    assert_eq!(menu.options().shiny_odds.one_in(), 10, "left is rarer");
+    menu.navigate(MenuNav::Right);
+    assert_eq!(menu.options().shiny_odds.one_in(), 5, "right is more often");
+    assert!(menu.options().shiny);
 }

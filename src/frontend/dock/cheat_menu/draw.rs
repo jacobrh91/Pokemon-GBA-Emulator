@@ -202,8 +202,24 @@ impl CheatMenu {
         checkbox(canvas, layout.exp_boost, options.exp_boost);
         checkbox_label(canvas, layout.exp_boost, "ALL EXPERIENCE IS BOOSTED");
         soon(canvas, CheatOption::ExpBoost, centre(layout.exp_boost));
+        let shiny_tone = tone(options.shiny);
         checkbox(canvas, layout.shiny, options.shiny);
-        checkbox_label(canvas, layout.shiny, "ALL POKEMON ARE SHINY");
+        canvas.text(
+            "SHINY CHANCE",
+            layout.shiny_label.0,
+            layout.shiny_label.1,
+            shiny_tone,
+        );
+        button(canvas, layout.shiny_minus, "-", shiny_tone);
+        button(canvas, layout.shiny_plus, "+", shiny_tone);
+        field(canvas, layout.shiny_value, false);
+        let odds_text = options.shiny_odds.label();
+        canvas.text(
+            &odds_text,
+            layout.shiny_value.x + (layout.shiny_value.width - text_width(&odds_text)) / 2,
+            centre(layout.shiny_value) - TEXT_HEIGHT / 2,
+            shiny_tone,
+        );
         soon(canvas, CheatOption::Shiny, centre(layout.shiny));
         checkbox(canvas, layout.no_encounters, options.no_encounters);
         checkbox_label(canvas, layout.no_encounters, "NO RANDOM ENCOUNTERS");

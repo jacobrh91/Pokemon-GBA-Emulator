@@ -6,7 +6,7 @@
 //! setting), so an old or hand-edited file never prevents a game from
 //! starting.
 
-use crate::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget};
+use crate::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget, ShinyOdds};
 use crate::cheats::scan::{CheatScan, RomFingerprint};
 use crate::cheats::species;
 use crate::game_library;
@@ -129,6 +129,14 @@ impl Settings {
                     }
                 }
                 "cheat_shiny" => set_flag(value, &mut settings.cheat_options.shiny),
+                "cheat_shiny_odds" => {
+                    // "10" or "1/10": one in ten.
+                    let number = value.strip_prefix("1/").unwrap_or(value);
+                    if let Some(odds) = number.parse::<u32>().ok().and_then(ShinyOdds::from_one_in)
+                    {
+                        settings.cheat_options.shiny_odds = odds;
+                    }
+                }
                 "cheat_perfect_target" => {
                     if let Some(target) = PerfectTarget::from_key(value) {
                         settings.cheat_options.perfect_target = target;
@@ -257,6 +265,12 @@ impl Settings {
         flag("cheat_catch_always", options.catch_always);
         flag("cheat_no_encounters", options.no_encounters);
         flag("cheat_exp_boost", options.exp_boost);
+        if options.shiny_odds != ShinyOdds::default() {
+            text.push_str(&format!(
+                "cheat_shiny_odds = {}\n",
+                options.shiny_odds.one_in()
+            ));
+        }
         // A row's switch is written whenever the row holds choices, even when
         // it is off: a missing switch means "a file from before the switches",
         // which reads saved choices as on.
@@ -362,6 +376,7 @@ mod tests {
             state_jitter_frames: 12,
             cheat_options: CheatOptions {
                 shiny: true,
+                shiny_odds: ShinyOdds::from_one_in(100).unwrap(),
                 wild_species: Some(147),
                 wild_level: Some(50),
                 perfect_target: PerfectTarget::Both,
