@@ -1020,3 +1020,92 @@ fn the_catch_cheat_is_off_until_its_row_is_on_and_leaves_other_games_alone() {
     assert_eq!(outcome, 2);
     assert_eq!(hook, None);
 }
+
+/// A ROM shaped like a FireRed build around the encounter dice roll: the
+/// function's real bytes, with the two calls replaced by `nop` and by
+/// `movs r0, #roll` (standing in for `Random() % 1600`), so the function's own
+/// comparison decides. An ARM stub calls it with `r0 = rate`; the answer is
+/// in `r0` once the Thumb code reaches the `b .` it returns to.
+fn encounter_rom(game_code: &[u8; 4], function: usize, rate: u32, roll: u8) -> std::path::PathBuf {
+    use crate::cheats::firered::encounters::SIGNATURE;
+    let mut rom = vec![0u8; 0x8_3000];
+    let mut put = |offset: usize, word: u32| {
+        rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    let spin = function + 0x80;
+    put(0x00, 0xEA00_002E); // b 0xC0 (over the header)
+    put(0xC0, 0xE3A0_0000 | (rate & 0xFF)); // mov r0, #rate
+    put(0xC4, 0xE59F_E00C); // ldr lr, [pc, #12]   (the word at 0xD8)
+    put(0xC8, 0xE59F_300C); // ldr r3, [pc, #12]   (the word at 0xDC)
+    put(0xCC, 0xE12F_FF13); // bx  r3
+    put(0xD8, 0x0800_0000 + spin as u32 + 1); // return address (Thumb)
+    put(0xDC, 0x0800_0000 + function as u32 + 1); // Thumb entry
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    for (index, byte) in SIGNATURE.iter().enumerate() {
+        rom[function + index] = byte.unwrap_or(0);
+    }
+    let mut put16 = |offset: usize, half: u16| {
+        rom[offset..offset + 2].copy_from_slice(&half.to_le_bytes());
+    };
+    put16(function + 8, 0x46C0); // nop              (bl Random)
+    put16(function + 10, 0x46C0); // nop
+    put16(function + 20, 0x2000 | u16::from(roll)); // movs r0, #roll (bl __umodsi3)
+    put16(function + 22, 0x46C0); // nop
+    put16(spin, 0xE7FE); // b .
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "gba-encounter-test-{}-{id}.gba",
+        std::process::id()
+    ));
+    std::fs::write(&path, rom).unwrap();
+    path
+}
+
+/// The function's answer (`r0`) for `roll < rate` or not.
+fn encounter_answer(game_code: &[u8; 4], rate: u32, roll: u8, options: CheatOptions) -> u32 {
+    let path = encounter_rom(game_code, 0x8_2A00, rate, roll);
+    let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    emulator.initialize_gba_startup(ROM_START).unwrap();
+    emulator.set_cheat_options(options);
+    for _ in 0..60 {
+        emulator.step().unwrap();
+    }
+    emulator.cpu().registers[0]
+}
+
+fn no_encounters() -> CheatOptions {
+    CheatOptions {
+        no_encounters: true,
+        ..CheatOptions::default()
+    }
+}
+
+#[test]
+fn the_encounter_cheat_turns_every_yes_into_no() {
+    // The game's own answer: an encounter when the roll is below the rate.
+    assert_eq!(
+        encounter_answer(b"BPRE", 50, 10, CheatOptions::default()),
+        1
+    );
+    assert_eq!(
+        encounter_answer(b"BPRE", 50, 90, CheatOptions::default()),
+        0
+    );
+    // With the cheat the answer is always no, including a certain encounter.
+    assert_eq!(encounter_answer(b"BPRE", 50, 10, no_encounters()), 0);
+    assert_eq!(encounter_answer(b"BPRE", 50, 90, no_encounters()), 0);
+    assert_eq!(encounter_answer(b"BPRE", 255, 0, no_encounters()), 0);
+}
+
+#[test]
+fn the_encounter_cheat_is_off_until_its_row_is_on_and_leaves_other_games_alone() {
+    let other = CheatOptions {
+        infinite_money: true,
+        catch_always: true,
+        ..CheatOptions::default()
+    };
+    assert_eq!(encounter_answer(b"BPRE", 50, 10, other), 1);
+    assert_eq!(encounter_answer(b"AXVE", 50, 10, no_encounters()), 1);
+}

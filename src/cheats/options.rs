@@ -82,6 +82,8 @@ pub struct CheatOptions {
     pub perfect_target: PerfectTarget,
     /// The player never runs out of money (FireRed).
     pub infinite_money: bool,
+    /// Walking never starts a wild encounter (FireRed).
+    pub no_encounters: bool,
     /// Every thrown ball catches (FireRed).
     pub catch_always: bool,
     /// All experience gained is boosted: every Pokémon is treated as a traded
@@ -104,6 +106,7 @@ pub enum CheatOption {
     InfiniteMoney,
     CatchAlways,
     ExpBoost,
+    NoEncounters,
 }
 
 impl CheatOptions {
@@ -119,6 +122,7 @@ impl CheatOptions {
                 | CheatOption::PerfectStats
                 | CheatOption::InfiniteMoney
                 | CheatOption::ExpBoost
+                | CheatOption::NoEncounters
         )
     }
 
@@ -179,6 +183,7 @@ mod tests {
             InfiniteMoney,
             CatchAlways,
             ExpBoost,
+            NoEncounters,
         ]
         .into_iter()
         .filter(|option| CheatOptions::is_live(*option))
@@ -192,7 +197,8 @@ mod tests {
                 PerfectStats,
                 InfiniteMoney,
                 CatchAlways,
-                ExpBoost
+                ExpBoost,
+                NoEncounters
             ]
         );
     }

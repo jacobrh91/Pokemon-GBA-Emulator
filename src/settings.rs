@@ -97,7 +97,7 @@ impl Settings {
         // address or `none`) are all present and well formed.
         let (mut scan_rom, mut scan_wild, mut scan_catch, mut scan_shiny) =
             (None, None, None, None);
-        let (mut scan_money, mut scan_traded) = (None, None);
+        let (mut scan_money, mut scan_traded, mut scan_roll) = (None, None, None);
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
             let Some((key, value)) = line.split_once('=') else {
@@ -140,6 +140,7 @@ impl Settings {
                     set_flag(value, &mut settings.cheat_options.infinite_money)
                 }
                 "cheat_catch_always" => set_flag(value, &mut settings.cheat_options.catch_always),
+                "cheat_no_encounters" => set_flag(value, &mut settings.cheat_options.no_encounters),
                 "cheat_exp_boost" => set_flag(value, &mut settings.cheat_options.exp_boost),
                 "cheat_wild_enabled" => {
                     wild_switch_seen = true;
@@ -168,6 +169,7 @@ impl Settings {
                 "cheat_scan_shiny" => scan_shiny = parse_address(value),
                 "cheat_scan_money_balance" => scan_money = parse_address(value),
                 "cheat_scan_exp_traded" => scan_traded = parse_address(value),
+                "cheat_scan_encounter_roll" => scan_roll = parse_address(value),
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -187,6 +189,7 @@ impl Settings {
             Some(shiny_point),
             Some(money_balance),
             Some(exp_traded),
+            Some(encounter_roll),
         ) = (
             scan_rom,
             scan_wild,
@@ -194,6 +197,7 @@ impl Settings {
             scan_shiny,
             scan_money,
             scan_traded,
+            scan_roll,
         ) {
             settings.cheat_scan = Some(CheatScan {
                 rom,
@@ -202,6 +206,7 @@ impl Settings {
                 shiny_point,
                 money_balance,
                 exp_traded,
+                encounter_roll,
             });
         }
         let options = &mut settings.cheat_options;
@@ -241,6 +246,7 @@ impl Settings {
 
         flag("cheat_infinite_money", options.infinite_money);
         flag("cheat_catch_always", options.catch_always);
+        flag("cheat_no_encounters", options.no_encounters);
         flag("cheat_exp_boost", options.exp_boost);
         // A row's switch is written whenever the row holds choices, even when
         // it is off: a missing switch means "a file from before the switches",
@@ -300,6 +306,7 @@ impl Settings {
                 ("cheat_scan_shiny", scan.shiny_point),
                 ("cheat_scan_money_balance", scan.money_balance),
                 ("cheat_scan_exp_traded", scan.exp_traded),
+                ("cheat_scan_encounter_roll", scan.encounter_roll),
             ] {
                 match address {
                     Some(address) => text.push_str(&format!("{key} = {address:#010X}\n")),
@@ -349,6 +356,7 @@ mod tests {
                 perfect_target: PerfectTarget::Both,
                 perfect_enabled: true,
                 infinite_money: true,
+                no_encounters: true,
                 ..CheatOptions::default()
             },
             cheat_scan: Some(CheatScan {
@@ -358,6 +366,7 @@ mod tests {
                 shiny_point: Some(0x0803_DB92),
                 money_balance: Some(0x0809_FD7C),
                 exp_traded: Some(0x0804_4288),
+                encounter_roll: Some(0x0808_2BDA),
             }),
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
@@ -564,13 +573,13 @@ window_height = 50
     fn an_incomplete_or_malformed_scan_is_dropped() {
         let rom = RomFingerprint::of(&[9]);
         let full = format!(
-            "cheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\ncheat_scan_money_balance = 0x0809FD7C\ncheat_scan_exp_traded = 0x08044288\n",
+            "cheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\ncheat_scan_money_balance = 0x0809FD7C\ncheat_scan_exp_traded = 0x08044288\ncheat_scan_encounter_roll = 0x08082BDA\n",
             rom.as_str()
         );
         let scan = Settings::parse(&full).cheat_scan.unwrap();
         assert_eq!(scan.create_wild_mon, Some(0x0800_1000));
         assert_eq!(scan.catch_check, None);
-        for missing in 0..6 {
+        for missing in 0..7 {
             let partial: String = full
                 .lines()
                 .enumerate()

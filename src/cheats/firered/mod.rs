@@ -12,6 +12,8 @@
 //!   catch odds, just before the game tests them).
 //! * [`shiny`]: replaces a value *in the middle of a routine* of the code that
 //!   builds every Pokémon (its personality value, so that it is shiny).
+//! * [`encounters`]: replaces the answer ("yes") at the end of the function
+//!   that rolls for a wild encounter on every step.
 //! * [`experience`]: replaces a value *in the middle of a routine* (the OT ID
 //!   the game compares with the player's), so that every Pokémon counts as
 //!   traded and earns the traded-Pokémon experience bonus.
@@ -77,6 +79,7 @@
 //! its own signature.
 
 pub mod catch_rate;
+pub mod encounters;
 pub mod experience;
 pub mod money;
 pub mod perfect_stats;

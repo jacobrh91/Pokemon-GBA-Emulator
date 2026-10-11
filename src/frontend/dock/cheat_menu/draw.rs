@@ -138,7 +138,7 @@ impl CheatMenu {
             layout.perfect_label.1 + TEXT_HEIGHT / 2,
         );
 
-        // Money, catch rate, experience, then shiny at the bottom.
+        // Money, catch rate, experience, shiny, then no encounters at the bottom.
         checkbox(canvas, layout.money, options.infinite_money);
         checkbox_label(canvas, layout.money, "INFINITE MONEY");
         soon(canvas, CheatOption::InfiniteMoney, centre(layout.money));
@@ -151,6 +151,13 @@ impl CheatMenu {
         checkbox(canvas, layout.shiny, options.shiny);
         checkbox_label(canvas, layout.shiny, "ALL POKEMON ARE SHINY");
         soon(canvas, CheatOption::Shiny, centre(layout.shiny));
+        checkbox(canvas, layout.no_encounters, options.no_encounters);
+        checkbox_label(canvas, layout.no_encounters, "NO RANDOM ENCOUNTERS");
+        soon(
+            canvas,
+            CheatOption::NoEncounters,
+            centre(layout.no_encounters),
+        );
 
         if self.dropdown_open() {
             self.draw_list(canvas, layout);

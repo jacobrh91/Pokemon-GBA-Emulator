@@ -67,6 +67,12 @@ pub struct Emulator {
     /// Where the boosted-experience cheat is applied while it is on, or
     /// `NO_HOOK`.
     exp_hook: u32,
+    /// The end of the wild-encounter dice roll, found by a signature scan (see
+    /// `cheats::firered::encounters`); `None` if not recognised.
+    encounter_roll: Option<u32>,
+    /// Where the no-random-encounters cheat is applied while it is on, or
+    /// `NO_HOOK`.
+    encounter_hook: u32,
     /// Which of those cheats are on.
     make_shiny: bool,
     perfect_wild: bool,
@@ -105,6 +111,7 @@ impl Emulator {
             shiny_point,
             money_balance,
             exp_traded,
+            encounter_roll,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         Ok(Self {
@@ -127,6 +134,8 @@ impl Emulator {
             money_hook: NO_HOOK,
             exp_traded,
             exp_hook: NO_HOOK,
+            encounter_roll,
+            encounter_hook: NO_HOOK,
             make_shiny: false,
             perfect_wild: false,
             perfect_opponents: false,
@@ -210,6 +219,10 @@ impl Emulator {
         // the largest the game allows.
         if pc_before == self.money_hook {
             self.cpu.registers[0] = money::SHOWN_BALANCE;
+        }
+        // No random encounters: the dice roll's answer is always "no".
+        if pc_before == self.encounter_hook {
+            self.cpu.registers[0] = 0;
         }
         // Boosted experience: the OT ID `IsTradedMon` is about to compare with
         // the player's is made a different one, so the Pokémon counts as
@@ -450,6 +463,11 @@ impl Emulator {
             Some(address) if self.cheat_options.catch_always => address,
             _ => NO_HOOK,
         };
+        // The no-encounters row: hook the end of the encounter dice roll.
+        self.encounter_hook = match self.encounter_roll {
+            Some(address) if self.cheat_options.no_encounters => address,
+            _ => NO_HOOK,
+        };
         // The experience row: hook the traded-Pokémon check.
         self.exp_hook = match self.exp_traded {
             Some(address) if self.cheat_options.exp_boost => address,
@@ -514,6 +532,7 @@ impl Emulator {
             shiny_point: self.shiny_point,
             money_balance: self.money_balance,
             exp_traded: self.exp_traded,
+            encounter_roll: self.encounter_roll,
         }
     }
 

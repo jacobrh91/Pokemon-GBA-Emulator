@@ -62,6 +62,7 @@ fn the_panel_fits_the_window_and_holds_every_control() {
         "the panel sits above the dock"
     );
     for rect in [
+        layout.no_encounters,
         layout.shiny,
         layout.wild_enable,
         layout.perfect_enable,
@@ -103,13 +104,14 @@ fn every_rows_own_checkbox_toggles_just_that_cheat_and_reports_one_change() {
     assert!(!menu.take_changed());
 
     type Pick = fn(&CheatOptions) -> bool;
-    let cases: [(Rect, Pick); 6] = [
+    let cases: [(Rect, Pick); 7] = [
         (layout.wild_enable, |o| o.wild_enabled),
         (layout.perfect_enable, |o| o.perfect_enabled),
         (layout.money, |o| o.infinite_money),
         (layout.catch, |o| o.catch_always),
         (layout.exp_boost, |o| o.exp_boost),
         (layout.shiny, |o| o.shiny),
+        (layout.no_encounters, |o| o.no_encounters),
     ];
     for (index, (rect, pick)) in cases.iter().enumerate() {
         assert!(
@@ -142,6 +144,7 @@ fn every_row_has_its_checkbox_in_one_column_at_the_left() {
         layout.catch,
         layout.exp_boost,
         layout.shiny,
+        layout.no_encounters,
     ];
     for rect in column {
         assert_eq!(rect.x, column[0].x, "one column");
@@ -608,6 +611,7 @@ fn drawing_every_state_stays_inside_the_window() {
                 infinite_money: true,
                 catch_always: true,
                 exp_boost: true,
+                no_encounters: true,
             },
             false,
         ),
@@ -657,6 +661,7 @@ fn only_options_that_are_not_live_are_tagged_soon() {
         CheatOption::CatchAlways,
         CheatOption::ExpBoost,
         CheatOption::Shiny,
+        CheatOption::NoEncounters,
     ];
     let expected_tags = rows
         .iter()
@@ -696,10 +701,11 @@ fn the_live_rows_are_untagged_and_the_still_inactive_rows_are_tagged() {
     assert!(!tagged(layout.catch), "100% catch rate works now");
     assert!(!tagged(layout.exp_boost), "boosted experience works now");
     assert!(!tagged(layout.shiny), "shiny works now");
+    assert!(!tagged(layout.no_encounters), "no encounters works now");
 }
 
 #[test]
-fn the_rows_run_wild_perfect_stats_money_catch_experience_then_shiny() {
+fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_then_no_encounters() {
     let layout = layout();
     let tops = [
         layout.dropdown.y,
@@ -708,22 +714,21 @@ fn the_rows_run_wild_perfect_stats_money_catch_experience_then_shiny() {
         layout.catch.y,
         layout.exp_boost.y,
         layout.shiny.y,
+        layout.no_encounters.y,
     ];
     assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "{tops:?}");
-    // Shiny is last: nothing in the panel is below it.
+    // No encounters is last: nothing in the panel is below it.
     for rect in [
         layout.dropdown,
         layout.perfect_dropdown,
         layout.money,
         layout.catch,
         layout.exp_boost,
+        layout.shiny,
         layout.level_minus,
     ] {
-        assert!(rect.y < layout.shiny.y);
+        assert!(rect.y < layout.no_encounters.y);
     }
-    // Experience is second to last: only shiny is below it.
-    assert!(layout.exp_boost.y < layout.shiny.y);
-    assert!(layout.catch.y < layout.exp_boost.y);
     // The perfect-stats dropdown shares its row with the row's label and
     // checkbox, to the right of both.
     assert_eq!(

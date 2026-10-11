@@ -64,6 +64,7 @@ game is played.
 | 100% catch rate | | **active** (FireRed) |
 | All experience is boosted | | **active** (FireRed); every Pokémon counts as traded (×1.5) |
 | All Pokémon are shiny | | **active** (FireRed) |
+| No random encounters | | **active** (FireRed) |
 
 - **A row that is switched off keeps its choices**, shown dimmed, so you can
   turn it back on without choosing again.
@@ -128,6 +129,21 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 ("Gotcha! MEWTWO was caught!") with it on, on v1.0, v1.1 and the Japanese build.
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
+
+### No random encounters (Pokémon FireRed)
+
+Every step on an encounter tile asks one small function whether a wild
+encounter happens: it compares `Random() % 1600` with the encounter rate (after
+the tile, a Repel, the lead Pokémon's ability and so on have scaled it) and
+returns 1 for "yes". With the row on, the emulator sets that answer to 0 at the
+end of the function, so the game carries on as if the dice had said no. Steps
+are still counted, a Repel still wears off, and fishing and scripted or static
+encounters (which do not ask) still work. The function is found by a signature
+scan (`src/cheats/firered/encounters.rs`).
+
+The hook is covered by a unit test that runs the function's real bytes in the
+emulator (`the_encounter_cheat_turns_every_yes_into_no`), the signature matches
+once in each of the three builds, and it was tried in the game on v1.1.
 
 ### Boosted experience (Pokémon FireRed)
 
@@ -357,6 +373,7 @@ src/
     firered/         Built-in FireRed cheats found by signature scan:
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
+      encounters.rs    no random encounters (the answer of the per-step dice roll)
       experience.rs    boosted experience (the OT ID IsTradedMon compares)
       money.rs         infinite money (the balance GetMoney returns)
       perfect_stats.rs perfect IVs (the fixed-IV local of the same routine)
