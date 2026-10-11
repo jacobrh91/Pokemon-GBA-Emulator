@@ -233,7 +233,11 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         };
         let pointer = Pointer {
             position,
-            left_down: window.get_mouse_down(minifb::MouseButton::Left),
+            // The window system's button state also covers clicks the window
+            // never received because it was not key yet (just after toggling
+            // full screen); the position check keeps clicks elsewhere out.
+            left_down: window.get_mouse_down(minifb::MouseButton::Left)
+                || (position.is_some() && window_control::left_button_down().unwrap_or(false)),
             scroll: window.get_scroll_wheel().map_or(0.0, |(_, y)| y),
         };
         dock.update(pointer, WINDOW_WIDTH, WINDOW_HEIGHT);

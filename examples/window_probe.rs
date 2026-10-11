@@ -1,10 +1,9 @@
-//! Compares the native pointer lookup with minifb's across a full-screen round
-//! trip. Opens a window briefly; move the mouse over it for meaningful numbers.
+//! Logs per-frame timing and view geometry right after toggling full screen.
 #[path = "../src/window_control.rs"]
 mod window_control;
 
-use minifb::{MouseMode, Scale, ScaleMode, Window, WindowOptions};
-use std::time::{Duration, Instant};
+use minifb::{Scale, ScaleMode, Window, WindowOptions};
+use std::time::Instant;
 
 fn main() {
     let (w, h) = (960usize, 640usize);
@@ -24,26 +23,32 @@ fn main() {
     let buffer = vec![0x0020_4060u32; w * h];
     window_control::lock_aspect_ratio(&window, w, h, 480, 320);
     window_control::enable_fullscreen(&window);
-    let pump = |window: &mut Window, ms: u64| {
-        let until = Instant::now() + Duration::from_millis(ms);
-        while Instant::now() < until && window.is_open() {
-            window.update_with_buffer(&buffer, w, h).unwrap();
-        }
-    };
-    let report = |window: &Window, label: &str| {
-        println!(
-            "{label:26} view={:?} native_pointer={:?} minifb_pass={:?}",
-            window_control::content_size(window),
-            window_control::pointer_in_picture_view(window).map(|(p, _)| p),
-            window.get_mouse_pos(MouseMode::Pass),
+    for _ in 0..30 {
+        window.update_with_buffer(&buffer, w, h).unwrap();
+    }
+    let start = Instant::now();
+    window_control::toggle_fullscreen(&window);
+    let mut last = Instant::now();
+    let mut previous = String::new();
+    while start.elapsed().as_secs_f32() < 3.5 {
+        let t = Instant::now();
+        window.update_with_buffer(&buffer, w, h).unwrap();
+        let frame_ms = t.elapsed().as_secs_f32() * 1000.0;
+        let state = format!(
+            "fs={} view={:?} active={}",
+            window_control::is_fullscreen(&window),
+            window_control::content_size(&window),
+            window.is_active()
         );
-    };
-    pump(&mut window, 400);
-    report(&window, "windowed");
-    window_control::toggle_fullscreen(&window);
-    pump(&mut window, 2200);
-    report(&window, "fullscreen");
-    window_control::toggle_fullscreen(&window);
-    pump(&mut window, 2200);
-    report(&window, "windowed after fullscreen");
+        if state != previous || frame_ms > 40.0 || last.elapsed().as_millis() > 100 {
+            println!(
+                "t={:5.0}ms frame={:6.1}ms {}",
+                start.elapsed().as_secs_f32() * 1000.0,
+                frame_ms,
+                state
+            );
+            previous = state;
+        }
+        last = Instant::now();
+    }
 }

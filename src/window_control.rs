@@ -53,6 +53,21 @@ pub fn pointer_in_picture_view(window: &Window) -> Option<((f32, f32), (f32, f32
     }
 }
 
+/// Whether the left mouse button is physically down, read from the window
+/// system rather than from events delivered to the window.
+///
+/// minifb only learns about a click if the window receives the mouse-down
+/// event. While the window is not key (during the full-screen transition and
+/// until it is re-activated afterwards) the first click is consumed to
+/// activate it, so a click on the dock right after toggling full screen was
+/// lost. `None` when the platform cannot say.
+pub fn left_button_down() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    return Some(mac::left_button_down());
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// True if `position` lies inside a window of `size`.
 pub fn contains(position: (f32, f32), size: (f32, f32)) -> bool {
     position.0 >= 0.0 && position.1 >= 0.0 && position.0 < size.0 && position.1 < size.1
@@ -176,6 +191,7 @@ mod mac {
     unsafe extern "C" {
         fn sel_registerName(name: *const c_char) -> *mut c_void;
         fn objc_msgSend();
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
         #[cfg(not(target_arch = "aarch64"))]
         fn objc_msgSend_stret();
     }
@@ -183,6 +199,20 @@ mod mac {
     fn selector(name: &CStr) -> *mut c_void {
         // Safety: `name` is a valid NUL-terminated string.
         unsafe { sel_registerName(name.as_ptr()) }
+    }
+
+    pub fn left_button_down() -> bool {
+        // Safety: `+[NSEvent pressedMouseButtons]` takes no arguments and
+        // returns an NSUInteger bit mask (bit 0 is the left button).
+        unsafe {
+            let class = objc_getClass(c"NSEvent".as_ptr());
+            if class.is_null() {
+                return false;
+            }
+            let call: unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize =
+                std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+            call(class, selector(c"pressedMouseButtons")) & 1 != 0
+        }
     }
 
     /// The `NSWindow` behind a minifb window (valid for the window's life).
