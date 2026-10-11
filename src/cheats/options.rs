@@ -78,7 +78,7 @@ pub struct CheatOptions {
     /// Switch of the perfect-stats row. While off, the target below is
     /// remembered but does nothing.
     pub perfect_enabled: bool,
-    /// Whose Pokémon get maximum IVs. Not active yet.
+    /// Whose Pokémon get maximum IVs (FireRed).
     pub perfect_target: PerfectTarget,
     /// The player never runs out of money. Not active yet.
     pub infinite_money: bool,
@@ -116,6 +116,7 @@ impl CheatOptions {
                 | CheatOption::WildLevel
                 | CheatOption::CatchAlways
                 | CheatOption::Shiny
+                | CheatOption::PerfectStats
         )
     }
 
@@ -166,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_wild_catch_and_shiny_options_are_live_so_far() {
+    fn only_the_wild_catch_shiny_and_perfect_options_are_live_so_far() {
         use CheatOption::*;
         let live: Vec<_> = [
             Shiny,
@@ -180,7 +181,10 @@ mod tests {
         .into_iter()
         .filter(|option| CheatOptions::is_live(*option))
         .collect();
-        assert_eq!(live, [Shiny, WildSpecies, WildLevel, CatchAlways]);
+        assert_eq!(
+            live,
+            [Shiny, WildSpecies, WildLevel, PerfectStats, CatchAlways]
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! header and checksum are verified before anything is modified, so a stale or
 //! damaged file is rejected without disturbing the running game.
 
-use super::Emulator;
+use super::{Emulator, NO_HOOK};
 use crate::state::{StateReader, StateWriter, fnv1a};
 use std::io;
 
@@ -87,6 +87,8 @@ impl Emulator {
         }
         // Idle-loop history belongs to the timeline being replaced.
         self.idle.reset();
+        // A state may be loaded in the middle of `CreateWildMon`'s run.
+        self.wild_return = NO_HOOK;
         Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use crate::cheats::Cheats;
-use crate::cheats::firered::shiny;
+use crate::cheats::firered::{perfect_stats, shiny};
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -52,8 +52,18 @@ pub struct Emulator {
     /// both known, found by a signature scan (see [`shiny`]); `None` if not
     /// recognised.
     shiny_point: Option<u32>,
-    /// Where the all-shiny cheat is applied while it is on, or `NO_HOOK`.
-    shiny_hook: u32,
+    /// Where the cheats that change a Pokémon as it is built (all shiny,
+    /// perfect stats) are applied while one is on, or `NO_HOOK`.
+    build_hook: u32,
+    /// Which of those cheats are on.
+    make_shiny: bool,
+    perfect_wild: bool,
+    perfect_opponents: bool,
+    /// Entry of `CreateWildMon` while a perfect-stats row needs to know when
+    /// a wild Pokémon is being built, or `NO_HOOK`.
+    wild_scope_hook: u32,
+    /// Where `CreateWildMon` returns to while it is running, or `NO_HOOK`.
+    wild_return: u32,
     /// Where the wild-encounter override is applied while it is active, or
     /// `NO_HOOK`, and the species / level written there (`NO_VALUE` to keep
     /// the game's).
@@ -98,7 +108,12 @@ impl Emulator {
             catch_check,
             catch_hook: NO_HOOK,
             shiny_point,
-            shiny_hook: NO_HOOK,
+            build_hook: NO_HOOK,
+            make_shiny: false,
+            perfect_wild: false,
+            perfect_opponents: false,
+            wild_scope_hook: NO_HOOK,
+            wild_return: NO_HOOK,
             cheat_options: CheatOptions::default(),
             wild_species_hook: NO_HOOK,
             wild_species: NO_VALUE,
@@ -167,10 +182,15 @@ impl Emulator {
         if pc_before == self.catch_hook {
             self.cpu.registers[6] = CATCH_ALWAYS_ODDS;
         }
-        // All Pokémon shiny: while a Pokémon is being built, make its
-        // personality value shiny for its OT ID.
-        if pc_before == self.shiny_hook {
-            self.make_new_pokemon_shiny();
+        // Perfect stats for wild Pokémon: know while `CreateWildMon` runs.
+        if pc_before == self.wild_scope_hook {
+            self.wild_return = self.cpu.registers[14] & !1;
+        } else if pc_before == self.wild_return {
+            self.wild_return = NO_HOOK;
+        }
+        // All Pokémon shiny, perfect stats: while a Pokémon is being built.
+        if pc_before == self.build_hook {
+            self.adjust_new_pokemon();
         }
         // Wild-encounter override: replace the species and/or level
         // arguments of the function that builds every wild encounter.
@@ -213,12 +233,32 @@ impl Emulator {
         Ok(cycles)
     }
 
-    /// At the hook inside `CreateBoxMon` (see [`shiny`]): rewrites the
-    /// personality value, in the local the function goes on to read and in the
-    /// `BoxPokemon` it was just stored in, so that the Pokémon is shiny for its
-    /// OT ID. Unown is left alone. A memory fault leaves everything unchanged.
-    fn make_new_pokemon_shiny(&mut self) {
+    /// At the hook inside `CreateBoxMon` (see [`shiny`] and
+    /// [`perfect_stats`]): applies the cheats that are on to the Pokémon being
+    /// built. A memory fault leaves everything unchanged.
+    fn adjust_new_pokemon(&mut self) {
         let sp = self.cpu.registers[13];
+        let ot_id_type = self.cpu.registers[perfect_stats::OT_ID_TYPE_REGISTER];
+        if perfect_stats::applies(
+            self.perfect_wild,
+            self.perfect_opponents,
+            self.wild_return != NO_HOOK,
+            ot_id_type,
+        ) {
+            let _ = self.memory.write_u8(
+                sp.wrapping_add(perfect_stats::FIXED_IV_OFFSET),
+                perfect_stats::PERFECT_IV,
+            );
+        }
+        if self.make_shiny {
+            self.make_new_pokemon_shiny(sp);
+        }
+    }
+
+    /// Rewrites the personality value, in the local the function goes on to
+    /// read and in the `BoxPokemon` it was just stored in, so that the Pokémon
+    /// is shiny for its OT ID. Unown is left alone.
+    fn make_new_pokemon_shiny(&mut self, sp: u32) {
         let box_mon = self.cpu.registers[shiny::BOX_MON_REGISTER];
         let memory = &mut self.memory;
         let Ok(species) = memory.read_u16(sp.wrapping_add(shiny::SPECIES_OFFSET)) else {
@@ -381,11 +421,22 @@ impl Emulator {
             Some(address) if self.cheat_options.catch_always => address,
             _ => NO_HOOK,
         };
-        // The all-Pokémon-are-shiny row: hook where a Pokémon is being built.
-        self.shiny_hook = match self.shiny_point {
-            Some(address) if self.cheat_options.shiny => address,
+        // The all-shiny and perfect-stats rows: hook where a Pokémon is being
+        // built. The perfect-stats row for wild Pokémon also watches
+        // `CreateWildMon`, to tell wild ones from the rest.
+        self.make_shiny = self.cheat_options.shiny;
+        self.perfect_wild = self.cheat_options.perfect_for_wild();
+        self.perfect_opponents = self.cheat_options.perfect_for_opponents();
+        let building = self.make_shiny || self.perfect_wild || self.perfect_opponents;
+        self.build_hook = match self.shiny_point {
+            Some(address) if building => address,
             _ => NO_HOOK,
         };
+        self.wild_scope_hook = match self.create_wild_mon {
+            Some(entry) if self.perfect_wild && self.build_hook != NO_HOOK => entry,
+            _ => NO_HOOK,
+        };
+        self.wild_return = NO_HOOK;
         // The wild-encounter override, driven by its row of the menu.
         self.wild_species_hook = NO_HOOK;
         self.wild_species = NO_VALUE;
@@ -444,7 +495,7 @@ impl Emulator {
 
     /// The bus address the all-shiny cheat hooks in this ROM, or `None` when
     /// it is not a FireRed build whose `CreateBoxMon` can be found.
-    pub fn shiny_hook_address(&self) -> Option<u32> {
+    pub fn build_hook_address(&self) -> Option<u32> {
         self.shiny_point
     }
 

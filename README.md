@@ -59,7 +59,7 @@ game is played.
 |---|---|---|
 | *n* codes from the cheats file (only when the file has codes) | | **active**; never remembered, so it starts off every session |
 | Wild Pokémon is *species* at level *n* | dropdown: ANY, then the 251 species; `-` / `+`, mouse wheel, `X` to clear for the level (empty keeps the game's) | **active** (FireRed) |
-| Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | not active yet (tagged SOON) |
+| Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | **active** (FireRed) |
 | Infinite money | | not active yet (tagged SOON) |
 | 100% catch rate | | **active** (FireRed) |
 | All experience is boosted | | not active yet (tagged SOON); the size of the boost is not decided |
@@ -129,6 +129,30 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
 
+### Perfect stats (Pokémon FireRed)
+
+`CreateBoxMon` keeps its `fixed_iv` argument in a local and tests it: above 31
+each IV is drawn at random, otherwise all six IVs are that value. With the row
+on, the emulator stores 31 there at the same place the shiny cheat uses, so the
+game's own code produces six perfect IVs (nature, gender and the rest are
+untouched). The dropdown chooses whose Pokémon:
+
+- **Wild Pokémon**: those built while `CreateWildMon` runs (grass, surfing,
+  fishing, rock smash; the same set as the wild-species override). Scripted
+  encounters such as a static Snorlax are built elsewhere and are not covered.
+- **Opponents' Pokémon**: those built with OT-ID type 2, which the game uses
+  for trainers' parties only.
+- **Both**.
+
+Checked in the game's memory from the save states in the grass: the first wild
+Pokémon has IVs `[31, 31, 31, 31, 31, 31]` with the row on and random ones
+without it, on v1.0, v1.1 and the Japanese build (with the target set to
+opponents only, the wild Pokémon is unchanged). The
+opponents' path was run against a real trainer battle on v1.1 (a step up from
+the grass state starts a trainer battle): the trainer's two Pokémon have IVs of
+0 without the cheat and `[31, 31, 31, 31, 31, 31]` with the target set to
+opponents or both, and are unchanged with it set to wild only.
+
 ### All Pokémon are shiny (Pokémon FireRed)
 
 In generation III a Pokémon is shiny when `OT ID high ^ OT ID low ^ PID high ^
@@ -145,7 +169,8 @@ is found by a signature scan like the others (`src/cheats/firered/shiny.rs`).
 
 From the save states in the grass, the first wild Pokémon is shiny with the
 row on, with the same OT ID, gender and nature as without it, on v1.0, v1.1 and
-the Japanese build (`tests/shiny_live.rs`).
+the Japanese build. These checks were run by hand from save states and are not
+automated tests, since they depend on a save state being in a particular place.
 
 ### Wild species override (Pokémon FireRed)
 
@@ -287,6 +312,7 @@ src/
     firered/         Built-in FireRed cheats found by signature scan:
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
+      perfect_stats.rs perfect IVs (the fixed-IV local of the same routine)
       shiny.rs         all Pokémon shiny (the PID, inside the routine that builds a Pokémon)
     options.rs       The cheat menu's options
     species.rs       Names of the 251 original species

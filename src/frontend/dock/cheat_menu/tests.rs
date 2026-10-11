@@ -663,8 +663,8 @@ fn only_options_that_are_not_live_are_tagged_soon() {
         .filter(|option| !CheatOptions::is_live(**option))
         .count();
     assert_eq!(
-        expected_tags, 3,
-        "the catch rate and shiny rows are live and untagged"
+        expected_tags, 2,
+        "only money and experience are still tagged"
     );
 
     // One tag is exactly the pixels of the text "SOON".
@@ -694,7 +694,7 @@ fn the_live_rows_are_untagged_and_the_still_inactive_rows_are_tagged() {
         (rect.y..rect.y + rect.height)
             .any(|y| (right..right + 60).any(|x| drawn[y as usize * WIDTH + x] == 0x008A_9299))
     };
-    assert!(tagged(layout.perfect_dropdown));
+    assert!(!tagged(layout.perfect_dropdown), "perfect stats works now");
     assert!(tagged(layout.money));
     assert!(!tagged(layout.catch), "100% catch rate works now");
     assert!(tagged(layout.exp_boost));

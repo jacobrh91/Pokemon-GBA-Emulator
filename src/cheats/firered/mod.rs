@@ -12,6 +12,8 @@
 //!   catch odds, just before the game tests them).
 //! * [`shiny`]: replaces a value *in the middle of a routine* of the code that
 //!   builds every Pokémon (its personality value, so that it is shiny).
+//! * [`perfect_stats`]: the same place, to set the IVs (a local that the
+//!   routine tests a little later).
 //!
 //! This module holds what they share: recognising a FireRed cartridge, the
 //! scan itself, and the table of builds that were checked.
@@ -49,7 +51,7 @@
 //!
 //! The shiny cheat's hook (inside `CreateBoxMon`) is at `0x0803DB92` (v1.0),
 //! `0x0803DBA6` (v1.1) and `0x0803D2FE` (Japan); each was checked live from a
-//! save state in the grass (`tests/shiny_live.rs`).
+//! save state in the grass.
 //!
 //! The enemy party is not at the same RAM address in every build (it is
 //! `0x0202402C` in the English builds and `0x02023F8C` in the Japanese one),
@@ -70,6 +72,7 @@
 //! its own signature.
 
 pub mod catch_rate;
+pub mod perfect_stats;
 pub mod shiny;
 pub mod wild_species;
 
