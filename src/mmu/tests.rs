@@ -818,3 +818,117 @@ fn the_port_overlays_the_rom_only_at_its_own_bytes_in_every_width_and_mirror() {
         "the word's high half"
     );
 }
+
+// ---- events the CPU can see ------------------------------------------------
+
+/// Where the visible part of the frame ends: HBlank of the last visible line.
+const FRAME_END_CYCLES: u32 = 159 * 1232 + 960;
+
+#[test]
+fn without_interrupts_or_dma_only_the_frame_end_is_visible() {
+    let mut bus = bus_with_rom(&[0; 4]);
+    assert_eq!(bus.cycles_until_visible_event(), FRAME_END_CYCLES);
+
+    // Timers nobody listens to and audio samples are not events either.
+    bus.write_u16(IO_REG_START + 0x100, 0xFFF0).unwrap();
+    bus.write_u16(IO_REG_START + 0x102, 0x0080).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), FRAME_END_CYCLES);
+
+    // The distance shrinks as time passes, and wraps to the next frame.
+    bus.advance(1000);
+    assert_eq!(bus.cycles_until_visible_event(), FRAME_END_CYCLES - 1000);
+    bus.sync();
+    bus.advance(FRAME_END_CYCLES - 1000);
+    bus.sync();
+    assert_eq!(bus.cycles_until_visible_event(), CYCLES_PER_FRAME_FOR_TESTS);
+}
+
+const CYCLES_PER_FRAME_FOR_TESTS: u32 = 1232 * 228;
+
+#[test]
+fn display_interrupts_make_their_scanline_events_visible() {
+    let mut bus = bus_with_rom(&[0; 4]);
+    let dispstat = IO_REG_START + DISPSTAT as u32;
+    // The frame ends before VBlank starts; once it has, VBlank is the next
+    // event the interrupt can come from.
+    bus.write_u16(dispstat, 1 << 3).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), FRAME_END_CYCLES);
+    bus.advance(FRAME_END_CYCLES + 100);
+    bus.sync();
+    assert_eq!(
+        bus.cycles_until_visible_event(),
+        1232 * 160 - FRAME_END_CYCLES - 100
+    );
+
+    // HBlank interrupt: the end of the first line's drawing.
+    let mut bus = bus_with_rom(&[0; 4]);
+    bus.write_u16(dispstat, 1 << 4).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), 960);
+    bus.advance(1000);
+    bus.sync();
+    assert_eq!(bus.cycles_until_visible_event(), 1232 - 1000 + 960);
+
+    // VCount interrupt on line 100.
+    let mut bus = bus_with_rom(&[0; 4]);
+    bus.write_u16(dispstat, 1 << 5 | 100 << 8).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), 1232 * 100);
+    // A match line past the end never comes.
+    bus.write_u16(dispstat, 1 << 5 | 250 << 8).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), FRAME_END_CYCLES);
+}
+
+#[test]
+fn a_waiting_dma_transfer_makes_its_trigger_visible() {
+    let mut bus = bus_with_rom(&[0; 4]);
+    let io = IO_REG_START;
+    bus.write_u32(io + 0xB0, EWRAM_START).unwrap();
+    bus.write_u32(io + 0xB4, IWRAM_START).unwrap();
+    bus.write_u16(io + 0xB8, 1).unwrap();
+    // Enabled, HBlank timing, repeating.
+    bus.write_u16(io + 0xBA, 0x8000 | 2 << 12 | 1 << 9).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), 960);
+    // Past the visible lines the next HBlank transfer is on line 0 again.
+    bus.advance(1232 * 170);
+    bus.sync();
+    assert_eq!(
+        bus.cycles_until_visible_event(),
+        CYCLES_PER_FRAME_FOR_TESTS - 1232 * 170 + 960
+    );
+}
+
+#[test]
+fn timer_overflows_are_visible_only_when_something_listens() {
+    let mut bus = bus_with_rom(&[0; 4]);
+    let io = IO_REG_START;
+    // Timer 1 counts 0x100 ticks of 1 cycle, with its interrupt.
+    bus.write_u16(io + 0x104, 0xFF00).unwrap();
+    bus.write_u16(io + 0x106, 0x00C0).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), 0x100);
+    // Cascaded timers wait for the timer below them to overflow first.
+    bus.write_u16(io + 0x108, 0xFFFF).unwrap();
+    bus.write_u16(io + 0x10A, 0x00C4).unwrap();
+    bus.write_u16(io + 0x106, 0x0080).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), 0x100);
+    // Without the interrupt on the top timer, nothing listens.
+    bus.write_u16(io + 0x10A, 0x0084).unwrap();
+    assert_eq!(bus.cycles_until_visible_event(), FRAME_END_CYCLES);
+}
+
+#[test]
+fn a_sound_fifo_refill_is_visible_when_the_fifo_runs_low() {
+    let mut bus = bus_with_rom(&[0; 4]);
+    let io = IO_REG_START;
+    // Timer 0: an overflow every 0x100 cycles. FIFO A plays from it and a
+    // sound DMA channel refills it.
+    bus.write_u16(io + 0x100, 0xFF00).unwrap();
+    bus.write_u16(io + 0x102, 0x0080).unwrap();
+    bus.write_u32(io + 0xBC, EWRAM_START).unwrap();
+    bus.write_u32(io + 0xC0, io + 0xA0).unwrap();
+    bus.write_u16(io + 0xC6, 0x8000 | 3 << 12 | 1 << 9 | 1 << 10)
+        .unwrap();
+    // 32 samples queued: the refill level is 16, so the 16th overflow asks.
+    for _ in 0..8 {
+        bus.write_u32(io + 0xA0, 0x0101_0101).unwrap();
+    }
+    assert_eq!(bus.cycles_until_visible_event(), 16 * 0x100);
+}

@@ -12,6 +12,7 @@ pub mod registers;
 mod save;
 mod state;
 mod timers;
+mod visible;
 mod waitstates;
 use crate::apu::{self, Apu};
 pub use display::ScanlineSnapshot;
@@ -88,12 +89,21 @@ pub struct MemoryBus {
     /// Bus writes performed so far; lets the emulator prove a loop has no
     /// side effects.
     write_count: u64,
-    /// Times pending time was applied (events and register writes). An
-    /// iteration of a loop is only side-effect free if none happened in it.
+    /// Times pending time was applied (events and register writes). A loop
+    /// that polls the display is only idle if none happened in an iteration.
     flush_count: u64,
+    /// Events the CPU can see so far: an interrupt flag that went up or a DMA
+    /// transfer that ran. An iteration of a loop is only side-effect free if
+    /// none happened in it; scanlines, audio samples and timer ticks nobody
+    /// listens to do not count.
+    visible_events: u64,
     /// Reads of registers whose value changes with every cycle (timer
-    /// counters); a loop that reads one is waiting on time, not an event.
+    /// counters, sound channel flags); a loop that reads one is waiting on
+    /// time, not an event.
     volatile_reads: Cell<u32>,
+    /// Reads of the display status and line, which change at scanline events
+    /// only: a loop that polls them is idle up to the next such event.
+    display_reads: Cell<u32>,
     /// Cycles from the last flush until the next scanline/HBlank boundary,
     /// timer overflow or audio sample.
     cycles_until_event: u32,
@@ -154,7 +164,9 @@ impl MemoryBus {
             pending_cycles: 0,
             write_count: 0,
             flush_count: 0,
+            visible_events: 0,
             volatile_reads: Cell::new(0),
+            display_reads: Cell::new(0),
             cycles_until_event: HBLANK_START_CYCLES,
             rom_cycles: decode_waitcnt(0).0,
             rom_mask,
@@ -427,7 +439,11 @@ impl MemoryBus {
         let elapsed = std::mem::take(&mut self.pending_cycles);
         if elapsed != 0 {
             self.flush_count += 1;
+            let requested = self.interrupt_flags();
             self.advance_elapsed(elapsed);
+            if self.interrupt_flags() & !requested != 0 {
+                self.visible_events += 1;
+            }
             self.reschedule();
         }
     }
@@ -455,9 +471,19 @@ impl MemoryBus {
         self.flush_count
     }
 
+    /// Interrupt requests raised and DMA transfers run so far.
+    pub fn visible_event_count(&self) -> u64 {
+        self.visible_events
+    }
+
     /// Reads of per-cycle-varying registers so far.
     pub fn volatile_read_count(&self) -> u32 {
         self.volatile_reads.get()
+    }
+
+    /// Reads of the display status and line so far.
+    pub fn display_read_count(&self) -> u32 {
+        self.display_reads.get()
     }
 
     /// Cycles the CPU can still run before the next observable event.
@@ -678,8 +704,20 @@ impl MemoryBus {
         Ok(())
     }
 
+    /// Notes a read of a register that changes with time alone.
+    fn note_volatile_read(&self) {
+        self.volatile_reads
+            .set(self.volatile_reads.get().wrapping_add(1));
+    }
+
+    fn note_display_read(&self) {
+        self.display_reads
+            .set(self.display_reads.get().wrapping_add(1));
+    }
+
     fn read_io_byte(&self, offset: usize) -> u8 {
         if offset == DISPSTAT {
+            self.note_display_read();
             let position = self.live_display_cycles();
             let scanline = position / CYCLES_PER_SCANLINE;
             let in_hblank = position % CYCLES_PER_SCANLINE >= HBLANK_START_CYCLES;
@@ -700,9 +738,11 @@ impl MemoryBus {
             return 0;
         }
         if offset == 0x84 {
+            self.note_volatile_read();
             return (self.io_regs[offset] & 0x80) | self.apu.channel_status();
         }
         if offset == VCOUNT {
+            self.note_display_read();
             return (self.live_display_cycles() / CYCLES_PER_SCANLINE) as u8;
         }
         if offset == VCOUNT + 1 {
@@ -719,8 +759,7 @@ impl MemoryBus {
             let timer_index = (offset - TIMER_BASE) / 4;
             let timer_register_offset = (offset - TIMER_BASE) % 4;
             if timer_register_offset < 2 {
-                self.volatile_reads
-                    .set(self.volatile_reads.get().wrapping_add(1));
+                self.note_volatile_read();
                 let counter = self.live_timer_counter(timer_index);
                 return if timer_register_offset == 0 {
                     counter as u8

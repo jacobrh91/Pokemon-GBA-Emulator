@@ -21,6 +21,14 @@ impl MemoryBus {
         ie & requested != 0
     }
 
+    /// The raw IF register.
+    pub(super) fn interrupt_flags(&self) -> u16 {
+        u16::from_le_bytes([
+            self.io_regs[INTERRUPT_REQUEST],
+            self.io_regs[INTERRUPT_REQUEST + 1],
+        ])
+    }
+
     pub fn irq_pending(&self) -> bool {
         self.io_regs[INTERRUPT_MASTER_ENABLE] & 1 != 0 && self.interrupt_requested()
     }

@@ -160,7 +160,27 @@ impl MemoryBus {
         self.dma_cycles != 0
     }
 
+    /// Whether an enabled channel starts its transfers at `timing`.
+    pub(super) fn dma_waits_for(&self, timing: DmaTiming) -> bool {
+        (0..4).any(|channel| {
+            self.dma[channel].active
+                && (self.dma_control(channel) >> CONTROL_TIMING_SHIFT) & 3 == timing as u16
+        })
+    }
+
+    /// Whether a sound DMA channel is set to refill `fifo` when it runs low.
+    pub(super) fn dma_refills_fifo(&self, fifo: usize) -> bool {
+        let target = IO_REG_START + (FIFO_A + fifo * 4) as u32;
+        [1, 2].into_iter().any(|channel| {
+            self.dma[channel].active
+                && (self.dma_control(channel) >> CONTROL_TIMING_SHIFT) & 3
+                    == DmaTiming::Special as u16
+                && self.dma[channel].destination & !3 == target
+        })
+    }
+
     fn run_dma(&mut self, channel: usize) {
+        self.visible_events += 1;
         let control = self.dma_control(channel);
         // Sound FIFO DMA: always four words to a fixed FIFO address.
         let fifo_transfer = (control >> CONTROL_TIMING_SHIFT) & 3 == DmaTiming::Special as u16

@@ -1,6 +1,6 @@
 use crate::cheats::Cheats;
 use crate::cheats::gen3::{
-    experience, field_moves, field_poison, money, party_menu, perfect_stats, shiny,
+    battle, experience, field_moves, field_poison, money, party_menu, perfect_stats, shiny,
 };
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
@@ -53,6 +53,8 @@ pub struct Emulator {
     /// always-on cheats (TMs, HMs, poison) run at these addresses; the others
     /// arm one of the hooks below while their row is on.
     scan: CheatScan,
+    /// Where the game keeps its in-battle flag (see [`battle`]), if known.
+    in_battle_byte: Option<u32>,
     catch_hook: u32,
     build_hook: u32,
     money_hook: u32,
@@ -92,6 +94,7 @@ impl Emulator {
     pub fn with_cheat_scan(rom_path: &str, previous: Option<&CheatScan>) -> io::Result<Self> {
         let memory = MemoryBus::new(rom_path)?;
         let scan = CheatScan::for_rom(&memory.rom, previous);
+        let in_battle_byte = memory.rom.get(0xAC..0xB0).and_then(battle::in_battle_byte);
         let mut emulator = Self {
             cpu: Cpu::default(),
             memory,
@@ -104,6 +107,7 @@ impl Emulator {
             cheats: Cheats::default(),
             cheat_hook: NO_HOOK,
             scan,
+            in_battle_byte,
             catch_hook: NO_HOOK,
             build_hook: NO_HOOK,
             money_hook: NO_HOOK,
@@ -427,10 +431,14 @@ impl Emulator {
     }
 
     /// After a backward jump: if the loop is provably idle, skips whole
-    /// iterations, stopping one short of the next event. Returns the cycles
-    /// skipped.
+    /// iterations, stopping one short of the next event the CPU can see.
+    /// Returns the cycles skipped.
     fn skip_idle_iterations(&mut self) -> u32 {
-        let Some(iteration) = self.idle.observe(&self.cpu, &self.memory) else {
+        // A frame that just ended is handed over at once, not after the skip.
+        if self.frame_ready {
+            return 0;
+        }
+        let Some((iteration, polls_display)) = self.idle.observe(&self.cpu, &self.memory) else {
             return 0;
         };
         let Ok(iteration) = u32::try_from(iteration) else {
@@ -439,15 +447,33 @@ impl Emulator {
         if iteration == 0 {
             return 0;
         }
-        let iterations = (self.memory.cycles_until_next_event() / iteration).saturating_sub(1);
+        // A loop that polls the display sees it change at the next scanline
+        // event; any other waits for an event the CPU can see.
+        let until_change = if polls_display {
+            self.memory.cycles_until_next_event()
+        } else {
+            self.memory.cycles_until_visible_event()
+        };
+        let iterations = (until_change / iteration).saturating_sub(1);
         let skipped = iterations * iteration;
         if skipped == 0 {
             return 0;
         }
         self.cpu.cycles += u64::from(skipped);
-        self.advance_bus(skipped);
+        self.advance_invisible(skipped);
         self.idle.skipped_to(self.cpu.cycles);
         skipped
+    }
+
+    /// Advances the bus by `cycles`, during which nothing the CPU can see
+    /// happens, one event at a time (the audio needs its timer ticks and
+    /// samples in order).
+    fn advance_invisible(&mut self, mut cycles: u32) {
+        while cycles != 0 {
+            let step = cycles.min(self.memory.cycles_until_next_event().max(1));
+            self.advance_bus(step);
+            cycles -= step;
+        }
     }
 
     /// Advances the bus and draws the scanlines that finished.
@@ -596,6 +622,15 @@ impl Emulator {
             self.cheat_options = options;
             self.update_cheat_hook();
         }
+    }
+
+    /// Whether the fast-battles option is on and a battle is being fought, so
+    /// the emulator should run flat out. False for games it does not cover.
+    pub fn battle_speedup_active(&self) -> bool {
+        self.cheat_options.fast_battles
+            && self
+                .in_battle_byte
+                .is_some_and(|address| self.memory.read_u8(address).is_ok_and(battle::is_in_battle))
     }
 
     /// The hook addresses found in this ROM, for the settings file.
