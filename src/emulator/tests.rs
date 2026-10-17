@@ -1288,3 +1288,140 @@ fn the_hm_cheat_covers_every_supported_game_and_no_other() {
     assert_eq!(knows_move(b"AXVE", first, 15), 0);
     assert_eq!(knows_move(b"AXPE", first, 15), 0);
 }
+
+/// A ROM with the party menu's two hook places: the capture signature at
+/// `capture` (its `bl` replaced by two `nop`s, followed by a jump to the append
+/// place) and the append signature at `append` (a `b .` at the hook). An ARM
+/// stub enters at the capture hook with `r0` = the list, `r1` = the count and
+/// `r10` = the selected slot.
+fn party_menu_rom(game_code: &[u8; 4], count_constant: u8, slot: u32) -> std::path::PathBuf {
+    use crate::cheats::gen3::party_menu::CAPTURE;
+    let mut rom = vec![0u8; 0x8_3000];
+    let capture = 0x8_2000;
+    let append = 0x8_2400;
+    let hook = capture + CAPTURE.hook_offset;
+    let mut put = |offset: usize, word: u32| {
+        rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    put(0x00, 0xEA00_002E); // b 0xC0 (over the header)
+    put(0xC0, 0xE59F_0018); // ldr r0, [pc, #24]   (the word at 0xE0: the list)
+    put(0xC4, 0xE59F_1018); // ldr r1, [pc, #24]   (the word at 0xE4: the count)
+    put(0xC8, 0xE3A0_A000 | slot); // mov sl, #slot
+    put(0xCC, 0xE59F_3014); // ldr r3, [pc, #20]   (the word at 0xE8)
+    put(0xD0, 0xE12F_FF13); // bx  r3
+    put(0xE0, 0x0300_0100);
+    put(0xE4, 0x0300_0200);
+    put(0xE8, 0x0800_0000 + hook as u32 + 1);
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    for (index, byte) in CAPTURE.bytes.iter().enumerate() {
+        rom[capture + index] = byte.unwrap_or(0);
+    }
+    let mut put16 = |offset: usize, half: u16| {
+        rom[offset..offset + 2].copy_from_slice(&half.to_le_bytes());
+    };
+    // The hook instruction and the one after it are `nop`s; then `ldr r3,
+    // [pc, #0] ; bx r3` to the append place.
+    put16(hook, 0x46C0);
+    put16(hook + 2, 0x46C0);
+    // The word to load must be 4-byte aligned: the instruction at `hook + 4`
+    // reads relative to its own address plus 4, rounded down.
+    let pool = (hook + 16) & !3;
+    let imm = (pool - ((hook + 8) & !3)) / 4;
+    put16(hook + 4, 0x4B00 | imm as u16); // ldr r3, [pc, #imm]
+    put16(hook + 6, 0x4718); // bx r3
+    let target = 0x0800_0000 + (append + 26) as u32 + 1;
+    rom[pool..pool + 4].copy_from_slice(&target.to_le_bytes());
+    let signature = {
+        let mut bytes = vec![
+            0x60,
+            0x1C,
+            0x00,
+            0x06,
+            0x04,
+            0x0E,
+            0x60,
+            0x00,
+            0x40,
+            0x19,
+            0x00,
+            0x88,
+            count_constant,
+            0x28,
+            0x00,
+            0xD1,
+            0x41,
+            0x46,
+            0x08,
+            0x06,
+            0x07,
+            0x0E,
+            0x03,
+            0x2F,
+            0x00,
+            0xD9,
+        ];
+        bytes.extend_from_slice(&0xE7FEu16.to_le_bytes()); // b . at the hook
+        bytes
+    };
+    rom[append..append + signature.len()].copy_from_slice(&signature);
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("gba-menu-test-{}-{id}.gba", std::process::id()));
+    std::fs::write(&path, rom).unwrap();
+    path
+}
+
+/// The list and count after the menu for `slot` has been built from a list that
+/// already holds SUMMARY and Cut.
+fn built_actions(game_code: &[u8; 4], count_constant: u8, slot: u32) -> (Vec<u8>, u8) {
+    let path = party_menu_rom(game_code, count_constant, slot);
+    let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    emulator.initialize_gba_startup(ROM_START).unwrap();
+    // SUMMARY and Cut: entry 0x13 in both layouts (index 1 of FireRed's table
+    // of field moves, index 0 of Emerald's).
+    let bus = emulator.memory_mut();
+    for (index, action) in [0u8, 0x13].into_iter().enumerate() {
+        bus.write_u8(0x0300_0100 + index as u32, action).unwrap();
+    }
+    bus.write_u8(0x0300_0200, 2).unwrap();
+    for _ in 0..200 {
+        emulator.step().unwrap();
+    }
+    let count = emulator.memory().read_u8(0x0300_0200).unwrap();
+    let list = (0..u32::from(count))
+        .map(|index| emulator.memory().read_u8(0x0300_0100 + index).unwrap())
+        .collect();
+    (list, count)
+}
+
+#[test]
+fn the_first_pokemons_menu_lists_the_hms_it_does_not_know() {
+    // FireRed / LeafGreen: it lists SUMMARY and Cut (0x13); Flash (0x12), Fly
+    // (0x14) and Surf (0x16) are added, Cut not twice.
+    assert_eq!(
+        built_actions(b"BPRE", 12, 0),
+        (vec![0, 0x13, 0x12, 0x14, 0x16], 5)
+    );
+    assert_eq!(
+        built_actions(b"BPGE", 12, 0),
+        (vec![0, 0x13, 0x12, 0x14, 0x16], 5)
+    );
+    // Emerald: SUMMARY and Cut (0x13); Flash (0x14), Fly (0x18), Dive (0x19).
+    assert_eq!(
+        built_actions(b"BPEE", 14, 0),
+        (vec![0, 0x13, 0x14, 0x18, 0x19], 5)
+    );
+}
+
+#[test]
+fn other_pokemons_menus_and_other_games_are_left_as_the_game_built_them() {
+    for slot in 1..6 {
+        assert_eq!(
+            built_actions(b"BPRE", 12, slot),
+            (vec![0, 0x13], 2),
+            "slot {slot}"
+        );
+    }
+    assert_eq!(built_actions(b"AXVE", 12, 0), (vec![0, 0x13], 2));
+}

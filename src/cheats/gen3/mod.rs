@@ -12,7 +12,8 @@
 //! * [`encounters`], [`money`]: replace the value a function returns.
 //! * [`tm`]: replaces an argument just before a call; always on.
 //! * [`field_moves`]: replaces the answer of `MonKnowsMove` for the first party
-//!   slot and an HM move; always on.
+//!   slot and an HM move; always on. [`party_menu`] adds the HMs to that
+//!   Pokémon's START-menu list of actions.
 //!
 //! This module holds what they share: recognising one of the cartridges, the
 //! scan, and the table of builds that were checked.
@@ -66,6 +67,7 @@ pub mod encounters;
 pub mod experience;
 pub mod field_moves;
 pub mod money;
+pub mod party_menu;
 pub mod perfect_stats;
 pub mod shiny;
 pub mod tm;
@@ -306,6 +308,8 @@ mod tests {
             tm: &'static [u32],
             /// `MonKnowsMove`'s return and the party array.
             field_moves: (u32, u32),
+            /// The party menu's capture and append hooks.
+            party_menu: (u32, u32),
         }
         let builds = [
             Build {
@@ -318,6 +322,7 @@ mod tests {
                 encounter: 0x0808_2BC6,
                 tm: &[0x0812_4EAC, 0x0812_4F78, 0x0812_5C80],
                 field_moves: (0x0812_5AE8, 0x0202_4284),
+                party_menu: (0x0812_2A22, 0x0812_2A9A),
             },
             Build {
                 file: "Pokemon Fire Red/Pokemon Fire Red (v1.1).gba",
@@ -329,6 +334,7 @@ mod tests {
                 encounter: 0x0808_2BDA,
                 tm: &[0x0812_4F24, 0x0812_4FF0, 0x0812_5CF8],
                 field_moves: (0x0812_5B60, 0x0202_4284),
+                party_menu: (0x0812_2A9A, 0x0812_2B12),
             },
             Build {
                 file: "Pokemon Fire Red/Pokemon Fire Red (J).gba",
@@ -340,6 +346,7 @@ mod tests {
                 encounter: 0x0808_27B2,
                 tm: &[0x0812_5810, 0x0812_58DC, 0x0812_65CC],
                 field_moves: (0x0812_6434, 0x0202_41E4),
+                party_menu: (0x0812_31FE, 0x0812_3276),
             },
             Build {
                 file: "Pokemon Leaf Green/Pokemon - Leaf Green (V1.1).gba",
@@ -351,6 +358,7 @@ mod tests {
                 encounter: 0x0808_2BAE,
                 tm: &[0x0812_4EFC, 0x0812_4FC8, 0x0812_5CD0],
                 field_moves: (0x0812_5B38, 0x0202_4284),
+                party_menu: (0x0812_2A72, 0x0812_2AEA),
             },
             Build {
                 file: "Pokemon Emerald/Pokemon - Emerald (USA, Europe).gba",
@@ -362,6 +370,7 @@ mod tests {
                 encounter: 0x080B_516A,
                 tm: &[0x081B_6EEC],
                 field_moves: (0x081B_6D6C, 0x0202_44EC),
+                party_menu: (0x081B_343A, 0x081B_34AA),
             },
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("rom");
@@ -392,6 +401,18 @@ mod tests {
                 }),
                 "{file}: field moves"
             );
+            let menu = party_menu::find(&rom).unwrap_or_else(|| panic!("{file}: party menu"));
+            assert_eq!(
+                (menu.capture, menu.append),
+                build.party_menu,
+                "{file}: party menu"
+            );
+            let expected_layout = if build.file.contains("Emerald") {
+                party_menu::Layout::Emerald
+            } else {
+                party_menu::Layout::FireRedLeafGreen
+            };
+            assert_eq!(menu.layout, expected_layout, "{file}: layout");
         }
     }
 }

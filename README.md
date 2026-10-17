@@ -197,11 +197,21 @@ party (`checkpartymove`), which is found by its bytes
 and LeafGreen builds, `0x020241E4` in the Japanese one and `0x020244EC` in
 Emerald, as the scan reads them.
 
-Only the game's own checks are covered. Choosing a field move from the START
-menu's party list (to Fly somewhere, for instance) reads the Pokémon's moves
-directly, so that menu does not list the HMs it does not really know.
+**The START menu** builds its own list when the first Pokémon is selected in the
+party: SUMMARY, one entry per field move among its four moves, then SWITCH, ITEM
+and CANCEL. The emulator adds the HMs it does not know to that list, so Flash,
+Fly (and Dive in Emerald), Cut, Surf and the rest can be chosen from it
+(`src/cheats/gen3/party_menu.rs`). The game's list holds eight entries and adds
+three after the HMs, so as many are added as fit (Flash first, then Fly, Dive,
+Cut, Surf, Strength, Rock Smash, Waterfall); a Pokémon that already lists its own
+field moves leaves room for fewer. Choosing one runs the game's own code for the
+move, which does not check that the Pokémon knows it (the badge is still needed).
+Only the first Pokémon's menu is changed.
 
-Checked on LeafGreen v1.1 from the save state in front of a cuttable tree
+Checked on LeafGreen v1.1 from the save state in a dark cave: selecting the
+first Pokémon in the party menu lists SUMMARY, FLASH, FLY, CUT, SURF, ITEM and
+CANCEL; choosing FLASH plays the field-move animation and the cave is lit.
+Earlier, from the save state in front of a cuttable tree
 with no Pokémon knowing Cut: A on the tree says "This tree looks like it can
 be CUT" and offers "Would you like to CUT it?"; answering yes plays the field-move
 animation with the first Pokémon and the tree is gone. A unit test runs the

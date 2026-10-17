@@ -7,13 +7,14 @@
 //! remembered too.
 
 use super::gen3::field_moves::{self, FieldMoves};
+use super::gen3::party_menu::{self, PartyMenu};
 use super::gen3::{catch_rate, encounters, experience, money, shiny, tm, wild_species};
 
 /// The version of the rules a scan follows. Results cached in a settings file
 /// are only trusted when they were made under the same version: bump this
 /// whenever what the scans accept changes (a new game recognised, a signature
 /// changed), so that "not found" answers from the old rules are not believed.
-pub const SCAN_VERSION: u32 = 4;
+pub const SCAN_VERSION: u32 = 5;
 
 /// Identifies a ROM image: `<length>-<hash>`, both in hex.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +64,8 @@ pub struct CheatScan {
     /// Where the first party Pokémon is made to know the HMs (see
     /// [`field_moves`]).
     pub field_moves: Option<FieldMoves>,
+    /// Where the party menu's action list is built (see [`party_menu`]).
+    pub party_menu: Option<PartyMenu>,
 }
 
 impl CheatScan {
@@ -78,6 +81,7 @@ impl CheatScan {
             encounter_roll: encounters::find(rom),
             tm_uses: tm::find(rom),
             field_moves: field_moves::find(rom),
+            party_menu: party_menu::find(rom),
         }
     }
 
@@ -119,6 +123,7 @@ mod tests {
             encounter_roll: None,
             tm_uses: Vec::new(),
             field_moves: None,
+            party_menu: None,
         };
         assert_eq!(CheatScan::for_rom(&rom, Some(&recorded)), recorded);
         let mut other = rom.clone();

@@ -87,6 +87,7 @@ impl Emulator {
         self.idle.reset();
         // A state may be loaded in the middle of `CreateWildMon`'s run.
         self.wild_return = NO_HOOK;
+        self.party_actions = None;
         Ok(())
     }
 }

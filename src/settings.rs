@@ -5,6 +5,7 @@
 //! values fall back to the default, so a bad file never blocks a game.
 
 use crate::cheats::gen3::field_moves::FieldMoves;
+use crate::cheats::gen3::party_menu::{Layout, PartyMenu};
 use crate::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget, ShinyOdds};
 use crate::cheats::scan::{CheatScan, RomFingerprint, SCAN_VERSION};
 use crate::cheats::species;
@@ -99,6 +100,7 @@ impl Settings {
         let (mut scan_money, mut scan_traded, mut scan_roll) = (None, None, None);
         let mut scan_tm = None;
         let mut scan_field_moves = None;
+        let mut scan_party_menu = None;
         let mut scan_version = None;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
@@ -183,6 +185,7 @@ impl Settings {
                 "cheat_scan_encounter_roll" => scan_roll = parse_address(value),
                 "cheat_scan_tm_uses" => scan_tm = parse_address_list(value),
                 "cheat_scan_field_moves" => scan_field_moves = parse_field_moves(value),
+                "cheat_scan_party_menu" => scan_party_menu = parse_party_menu(value),
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -209,6 +212,7 @@ impl Settings {
             Some(encounter_roll),
             Some(tm_uses),
             Some(field_moves),
+            Some(party_menu),
         ) = (
             scan_rom,
             scan_wild,
@@ -219,6 +223,7 @@ impl Settings {
             scan_roll,
             scan_tm,
             scan_field_moves,
+            scan_party_menu,
         ) {
             settings.cheat_scan = Some(CheatScan {
                 rom,
@@ -230,6 +235,7 @@ impl Settings {
                 encounter_roll,
                 tm_uses,
                 field_moves,
+                party_menu,
             });
         }
         let options = &mut settings.cheat_options;
@@ -361,6 +367,16 @@ impl Settings {
                 None => "none".to_owned(),
             };
             text.push_str(&format!("cheat_scan_field_moves = {moves}\n"));
+            let menu = match scan.party_menu {
+                Some(menu) => format!(
+                    "{:#010X}, {:#010X}, {}",
+                    menu.capture,
+                    menu.append,
+                    menu.layout.key()
+                ),
+                None => "none".to_owned(),
+            };
+            text.push_str(&format!("cheat_scan_party_menu = {menu}\n"));
         }
         text
     }
@@ -401,6 +417,23 @@ fn parse_field_moves(value: &str) -> Option<Option<FieldMoves>> {
         })),
         _ => None,
     }
+}
+
+/// `Some(None)` for `none`, `Some(Some(..))` for the two addresses and the
+/// layout (`frlg` or `emerald`), `None` for anything else.
+fn parse_party_menu(value: &str) -> Option<Option<PartyMenu>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(None);
+    }
+    let mut parts = value.split(',').map(str::trim);
+    let capture = parse_address(parts.next()?)??;
+    let append = parse_address(parts.next()?)??;
+    let layout = Layout::from_key(parts.next()?)?;
+    parts.next().is_none().then_some(Some(PartyMenu {
+        capture,
+        append,
+        layout,
+    }))
 }
 
 fn set_flag(value: &str, target: &mut bool) {
@@ -445,6 +478,11 @@ mod tests {
                 field_moves: Some(FieldMoves {
                     knows_move_return: 0x0812_5B60,
                     party_base: 0x0202_4284,
+                }),
+                party_menu: Some(PartyMenu {
+                    capture: 0x0812_2A9A,
+                    append: 0x0812_2B12,
+                    layout: Layout::FireRedLeafGreen,
                 }),
             }),
         };
@@ -652,13 +690,13 @@ window_height = 50
     fn an_incomplete_or_malformed_scan_is_dropped() {
         let rom = RomFingerprint::of(&[9]);
         let full = format!(
-            "cheat_scan_version = {SCAN_VERSION}\ncheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\ncheat_scan_money_balance = 0x0809FD7C\ncheat_scan_exp_traded = 0x08044288\ncheat_scan_encounter_roll = 0x08082BDA\ncheat_scan_tm_uses = 0x08124F24, 0x08124FF0\ncheat_scan_field_moves = 0x08125B60, 0x02024284\n",
+            "cheat_scan_version = {SCAN_VERSION}\ncheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\ncheat_scan_money_balance = 0x0809FD7C\ncheat_scan_exp_traded = 0x08044288\ncheat_scan_encounter_roll = 0x08082BDA\ncheat_scan_tm_uses = 0x08124F24, 0x08124FF0\ncheat_scan_field_moves = 0x08125B60, 0x02024284\ncheat_scan_party_menu = 0x08122A9A, 0x08122B12, frlg\n",
             rom.as_str()
         );
         let scan = Settings::parse(&full).cheat_scan.unwrap();
         assert_eq!(scan.create_wild_mon, Some(0x0800_1000));
         assert_eq!(scan.catch_check, None);
-        for missing in 0..10 {
+        for missing in 0..11 {
             let partial: String = full
                 .lines()
                 .enumerate()
@@ -684,6 +722,7 @@ window_height = 50
             encounter_roll: None,
             tm_uses: Vec::new(),
             field_moves: None,
+            party_menu: None,
         };
         let settings = Settings {
             cheat_scan: Some(scan),

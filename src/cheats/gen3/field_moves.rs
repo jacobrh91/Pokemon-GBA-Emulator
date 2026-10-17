@@ -12,9 +12,9 @@
 //! the move, including the "X used CUT!" that names it. The Pokémon's real
 //! moves are never touched.
 //!
-//! This is what the game's own checks see. Choosing a field move from the
-//! Pokémon's menu (the START menu's party list) reads the moves directly, so
-//! it is not covered.
+//! This is what the game's own checks see. The START menu's party list builds
+//! its own list of the Pokémon's field moves by reading its moves directly;
+//! [`super::party_menu`] adds the HMs to that list for the first Pokémon.
 //!
 //! # Finding it
 //!

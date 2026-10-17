@@ -1,5 +1,5 @@
 use crate::cheats::Cheats;
-use crate::cheats::gen3::{experience, field_moves, money, perfect_stats, shiny};
+use crate::cheats::gen3::{experience, field_moves, money, party_menu, perfect_stats, shiny};
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -59,6 +59,12 @@ pub struct Emulator {
     /// signature scans (see `cheats::gen3::field_moves`); `None` if not
     /// recognised. The cheat is always on, so this is the hook itself.
     field_moves: Option<field_moves::FieldMoves>,
+    /// Where the party menu builds its list of actions, found by signature
+    /// scans (see `cheats::gen3::party_menu`); `None` if not recognised.
+    party_menu: Option<party_menu::PartyMenu>,
+    /// The address of that list and of its count, while the menu for the first
+    /// Pokémon is being built.
+    party_actions: Option<(u32, u32)>,
     make_shiny: bool,
     /// With `make_shiny`: one Pokémon in this many is made shiny.
     shiny_one_in: u32,
@@ -97,6 +103,7 @@ impl Emulator {
             encounter_roll,
             tm_uses,
             field_moves,
+            party_menu,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         let mut emulator = Self {
@@ -123,6 +130,8 @@ impl Emulator {
             encounter_hook: NO_HOOK,
             tm_uses,
             field_moves,
+            party_menu,
+            party_actions: None,
             make_shiny: false,
             hook_filter: Box::new([0; HOOK_FILTER_BITS / 64]),
             shiny_one_in: 1,
@@ -278,6 +287,10 @@ impl Emulator {
         if let Some(moves) = self.field_moves {
             self.watch(moves.knows_move_return);
         }
+        if let Some(menu) = self.party_menu {
+            self.watch(menu.capture);
+            self.watch(menu.append);
+        }
     }
 
     /// Runs the cheats hooked at `pc_before` (the filter may let other
@@ -319,6 +332,17 @@ impl Emulator {
         {
             self.cpu.registers[0] = 1;
         }
+        // The first Pokémon's party-menu actions list the HMs (always on).
+        if let Some(menu) = self.party_menu {
+            if pc_before == menu.capture {
+                // `r10` is the selected slot; `r0` and `r1` the list and count.
+                let slot = self.cpu.registers[10] & 0xFF;
+                self.party_actions =
+                    (slot == 0).then_some((self.cpu.registers[0], self.cpu.registers[1]));
+            } else if pc_before == menu.append {
+                self.append_hm_actions(menu.layout);
+            }
+        }
         // No random encounters: the dice roll always says no.
         if pc_before == self.encounter_hook {
             self.cpu.registers[0] = 0;
@@ -340,6 +364,30 @@ impl Emulator {
                 self.cpu.registers[1] = self.wild_level;
             }
         }
+    }
+
+    /// At the party menu's append hook: adds the HMs the first Pokémon does not
+    /// list to the actions the game has built (see `party_menu`). A memory
+    /// fault leaves the list as it is.
+    fn append_hm_actions(&mut self, layout: party_menu::Layout) {
+        let Some((list, count_pointer)) = self.party_actions.take() else {
+            return;
+        };
+        let Ok(count) = self.memory.read_u8(count_pointer) else {
+            return;
+        };
+        let present: Vec<u8> = (0..u32::from(count))
+            .filter_map(|index| self.memory.read_u8(list + index).ok())
+            .collect();
+        let extra = party_menu::extra_actions(layout, &present);
+        for (index, action) in extra.iter().enumerate() {
+            let _ = self
+                .memory
+                .write_u8(list + u32::from(count) + index as u32, *action);
+        }
+        let _ = self
+            .memory
+            .write_u8(count_pointer, count + extra.len() as u8);
     }
 
     /// At the hook inside `CreateBoxMon`: applies the cheats that are on to
@@ -591,6 +639,7 @@ impl Emulator {
             encounter_roll: self.encounter_roll,
             tm_uses: self.tm_uses.clone(),
             field_moves: self.field_moves,
+            party_menu: self.party_menu,
         }
     }
 
