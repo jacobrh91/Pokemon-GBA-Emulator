@@ -235,11 +235,7 @@ impl Ppu {
             let top = top.unwrap_or(backdrop_pixel);
             let below = below.unwrap_or(backdrop_pixel);
 
-            *pixel = if visible_layers & EFFECT_ENABLE != 0 {
-                blend.apply(top, below)
-            } else {
-                top.color
-            };
+            *pixel = blend.apply(top, below, visible_layers & EFFECT_ENABLE != 0);
         }
     }
 }

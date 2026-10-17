@@ -713,6 +713,51 @@ fn semi_transparent_sprites_blend_with_the_layer_beneath() {
     );
 }
 
+#[test]
+fn semi_transparent_sprites_blend_even_where_a_window_turns_effects_off() {
+    // Pokémon FireRed and LeafGreen draw the fog of the Pokémon Tower this
+    // way: semi-transparent sprites over a window that covers the whole
+    // screen and has the color-effects bit off. The fog must stay see-through.
+    let mut memory = memory_bus();
+    hide_all_sprites(&mut memory);
+    two_background_scene(&mut memory);
+    sprite_palette(&mut memory, 1, 0x03E0); // green
+    solid_tile(&mut memory, 0, 1);
+    set_sprite(&mut memory, 0, 1 << 10, 0, 0);
+
+    let mut registers = blend_registers(0x0200, 8 | (8 << 8), 0);
+    registers[0..2].copy_from_slice(&(0x2300 | OBJ_ON_1D).to_le_bytes()); // + WIN0
+    registers[1] = 0x32; // BG1 + OBJ + WIN0
+    put16(&mut registers, 0x40, 240); // WIN0 across the screen
+    put16(&mut registers, 0x44, 160);
+    registers[0x48] = 0x12; // inside: BG1 + OBJ, effects off
+    registers[0x4A] = 0x00;
+
+    let mut ppu = Ppu::default();
+    ppu.render_scanline(0, &registers, &memory);
+    assert_eq!(color_at(&ppu, 0, 0), expand([0, 15, 15]), "still blended");
+    assert_eq!(
+        color_at(&ppu, 20, 0),
+        expand([0, 0, 31]),
+        "beyond the sprite"
+    );
+}
+
+#[test]
+fn a_window_that_turns_effects_off_still_stops_the_effects_that_are_not_sprite_blending() {
+    // The same window leaves an ordinary alpha blend of two backgrounds off.
+    let mut memory = memory_bus();
+    two_background_scene(&mut memory);
+    let mut registers = blend_registers(0x0001 | (1 << 6) | 0x0200, 8 | (8 << 8), 0);
+    registers[1] = 0x23; // BG0 + BG1 + WIN0
+    put16(&mut registers, 0x40, 240);
+    put16(&mut registers, 0x44, 160);
+    registers[0x48] = 0x03; // BG0 + BG1, effects off
+    let mut ppu = Ppu::default();
+    ppu.render_scanline(0, &registers, &memory);
+    assert_eq!(color_at(&ppu, 50, 0), expand([31, 0, 0]), "not blended");
+}
+
 // ---- affine backgrounds, bitmap modes, mosaic, sprite budget ----------
 
 fn put16(registers: &mut [u8], offset: usize, value: u16) {

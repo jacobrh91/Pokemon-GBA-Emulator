@@ -1398,19 +1398,19 @@ fn built_actions(game_code: &[u8; 4], count_constant: u8, slot: u32) -> (Vec<u8>
 #[test]
 fn the_first_pokemons_menu_lists_the_hms_it_does_not_know() {
     // FireRed / LeafGreen: it lists SUMMARY and Cut (0x13); Flash (0x12), Fly
-    // (0x14) and Surf (0x16) are added, Cut not twice.
+    // (0x14) and Dig (0x1A) are added.
     assert_eq!(
         built_actions(b"BPRE", 12, 0),
-        (vec![0, 0x13, 0x12, 0x14, 0x16], 5)
+        (vec![0, 0x13, 0x12, 0x14, 0x1A], 5)
     );
     assert_eq!(
         built_actions(b"BPGE", 12, 0),
-        (vec![0, 0x13, 0x12, 0x14, 0x16], 5)
+        (vec![0, 0x13, 0x12, 0x14, 0x1A], 5)
     );
-    // Emerald: SUMMARY and Cut (0x13); Flash (0x14), Fly (0x18), Dive (0x19).
+    // Emerald: SUMMARY and Cut (0x13); Flash (0x14), Fly (0x18), Dig (0x1C).
     assert_eq!(
         built_actions(b"BPEE", 14, 0),
-        (vec![0, 0x13, 0x14, 0x18, 0x19], 5)
+        (vec![0, 0x13, 0x14, 0x18, 0x1C], 5)
     );
 }
 

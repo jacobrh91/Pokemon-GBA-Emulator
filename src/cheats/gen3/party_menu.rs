@@ -1,7 +1,8 @@
-//! The party menu's list of actions for the first Pokémon includes the HMs it
-//! does not know, so they can be chosen from the START menu (Flash in a dark
-//! cave, Fly to a town, Dive). Part of the always-on "first Pokémon knows every
-//! HM" cheat (see [`super::field_moves`], which covers the game's own checks).
+//! The party menu's list of actions for the first Pokémon includes field moves
+//! it does not know, so they can be chosen from the START menu: Flash in a dark
+//! cave, Fly to a town, Dig and Teleport to get out of somewhere, and the other
+//! HMs when there is room. Part of the always-on "first Pokémon knows every HM"
+//! cheat (see [`super::field_moves`], which covers the game's own checks).
 //!
 //! **Mechanism: change a list the game has just built.** When a Pokémon is
 //! selected in the party menu, `SetPartyMonFieldSelectionActions` builds the
@@ -19,13 +20,15 @@
 //!
 //! The list holds eight entries and the game adds up to three more after the
 //! second hook, so at most five (SUMMARY and the field moves) may be in it at
-//! that point; HMs are added only while there is room, in the order Flash, Fly,
-//! Dive, Cut, Surf, Strength, Rock Smash, Waterfall (the ones that cannot be
-//! used any other way first: the others work from the overworld through
-//! [`super::field_moves`]).
+//! that point; entries are added only while there is room, in the order Flash,
+//! Fly, Dig, Teleport, Dive (Emerald), Cut, Surf, Strength, Rock Smash,
+//! Waterfall. The ones that can only be used from this menu come first; Cut,
+//! Surf, Strength, Rock Smash and Waterfall also work from the overworld
+//! through [`super::field_moves`], so they are last.
 //!
 //! Choosing the entry runs the game's own code for the move, which does not
-//! check that the Pokémon knows it (it needs the badge, as ever).
+//! check that the Pokémon knows it (the HMs need their badge, as ever; Dig and
+//! Teleport need none, only a place where they work).
 //!
 //! # The signatures
 //!
@@ -79,14 +82,20 @@ impl Layout {
         }
     }
 
-    /// The indexes (in the game's table of field moves) of the HMs, in the
-    /// order they are offered.
-    fn hm_indexes(self) -> &'static [u8] {
+    /// The indexes (in the game's table of field moves) of the moves that are
+    /// offered, in the order they are offered. The game's tables are, for
+    /// FireRed and LeafGreen: Flash 0, Cut 1, Fly 2, Strength 3, Surf 4, Rock
+    /// Smash 5, Waterfall 6, Teleport 7, Dig 8; and for Emerald: Cut 0, Flash 1,
+    /// Rock Smash 2, Strength 3, Surf 4, Fly 5, Dive 6, Waterfall 7, Teleport 8,
+    /// Dig 9.
+    fn offered_indexes(self) -> &'static [u8] {
         match self {
-            // Flash, Cut, Fly, Strength, Surf, Rock Smash, Waterfall.
-            Self::FireRedLeafGreen => &[0, 2, 1, 4, 3, 5, 6],
-            // Cut, Flash, Rock Smash, Strength, Surf, Fly, Dive, Waterfall.
-            Self::Emerald => &[1, 5, 6, 0, 4, 3, 2, 7],
+            // Flash, Fly, Dig, Teleport, Cut, Surf, Strength, Rock Smash,
+            // Waterfall.
+            Self::FireRedLeafGreen => &[0, 2, 8, 7, 1, 4, 3, 5, 6],
+            // Flash, Fly, Dig, Teleport, Dive, Cut, Surf, Strength, Rock Smash,
+            // Waterfall.
+            Self::Emerald => &[1, 5, 9, 8, 6, 0, 4, 3, 2, 7],
         }
     }
 }
@@ -193,13 +202,13 @@ pub fn find(rom: &[u8]) -> Option<PartyMenu> {
 }
 
 /// The entries to add to a list that holds `present` (the game's own, SUMMARY
-/// and the field moves of the Pokémon): the HMs it does not already list, in
+/// and the field moves of the Pokémon): the moves it does not already list, in
 /// the order offered, as many as fit.
 pub fn extra_actions(layout: Layout, present: &[u8]) -> Vec<u8> {
     let first = layout.first_field_move_action();
     let room = (LIST_CAPACITY - ADDED_AFTER).saturating_sub(present.len());
     layout
-        .hm_indexes()
+        .offered_indexes()
         .iter()
         .map(|index| first + index)
         .filter(|action| !present.contains(action))
@@ -272,29 +281,35 @@ mod tests {
     #[test]
     fn a_pokemon_with_no_field_moves_is_offered_flash_first() {
         // FireRed / LeafGreen: SUMMARY (0) only. Room for four: Flash (0x12),
-        // Fly (0x14), Cut (0x13), Surf (0x16).
+        // Fly (0x14), Dig (0x12 + 8) and Teleport (0x12 + 7).
         assert_eq!(
             extra_actions(Layout::FireRedLeafGreen, &[0]),
-            vec![0x12, 0x14, 0x13, 0x16]
+            vec![0x12, 0x14, 0x1A, 0x19]
         );
-        // Emerald: Flash (0x14), Fly (0x18), Dive (0x19), Cut (0x13).
+        // Emerald: Flash (0x13 + 1), Fly (0x13 + 5), Dig (0x13 + 9) and
+        // Teleport (0x13 + 8).
         assert_eq!(
             extra_actions(Layout::Emerald, &[0]),
-            vec![0x14, 0x18, 0x19, 0x13]
+            vec![0x14, 0x18, 0x1C, 0x1B]
         );
     }
 
     #[test]
     fn what_the_pokemon_already_lists_is_not_repeated_and_room_is_respected() {
-        // It knows Cut: SUMMARY and Cut (0x13) are there; Flash, Fly and Surf
+        // It knows Cut: SUMMARY and Cut (0x13) are there; Flash, Fly and Dig
         // fill the three places left.
         assert_eq!(
             extra_actions(Layout::FireRedLeafGreen, &[0, 0x13]),
-            vec![0x12, 0x14, 0x16]
+            vec![0x12, 0x14, 0x1A]
+        );
+        // It knows Dig itself: it is not offered twice, Teleport takes its place.
+        assert_eq!(
+            extra_actions(Layout::FireRedLeafGreen, &[0, 0x1A]),
+            vec![0x12, 0x14, 0x19]
         );
         // Four field moves of its own leave no room at all.
         assert!(extra_actions(Layout::FireRedLeafGreen, &[0, 0x13, 0x15, 0x17, 0x18]).is_empty());
-        // Entries that are not field moves (Cancel...) never count as HMs.
+        // Entries that are not field moves (Cancel...) never count.
         assert_eq!(extra_actions(Layout::Emerald, &[0, 2]).len(), 3);
     }
 

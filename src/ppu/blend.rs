@@ -42,14 +42,18 @@ impl Blend {
         }
     }
 
-    pub(super) fn apply(&self, top: LayerPixel, below: LayerPixel) -> Pixel {
+    /// The pixel for `top` over `below`. `effects_allowed` is whether the
+    /// window the pixel is in lets color special effects through; a
+    /// semi-transparent sprite blends even when it does not (the game's fog,
+    /// for one, relies on that).
+    pub(super) fn apply(&self, top: LayerPixel, below: LayerPixel, effects_allowed: bool) -> Pixel {
         let second_matches = self.second_targets & below.layer != 0;
         // A semi-transparent sprite blends with whatever is below it, even
         // if BLDCNT selects no effect.
         if top.semi_transparent && second_matches {
             return self.alpha(top.color, below.color);
         }
-        if self.first_targets & top.layer == 0 {
+        if !effects_allowed || self.first_targets & top.layer == 0 {
             return top.color;
         }
         match self.effect {

@@ -199,18 +199,21 @@ Emerald, as the scan reads them.
 
 **The START menu** builds its own list when the first Pokémon is selected in the
 party: SUMMARY, one entry per field move among its four moves, then SWITCH, ITEM
-and CANCEL. The emulator adds the HMs it does not know to that list, so Flash,
-Fly (and Dive in Emerald), Cut, Surf and the rest can be chosen from it
-(`src/cheats/gen3/party_menu.rs`). The game's list holds eight entries and adds
-three after the HMs, so as many are added as fit (Flash first, then Fly, Dive,
-Cut, Surf, Strength, Rock Smash, Waterfall); a Pokémon that already lists its own
-field moves leaves room for fewer. Choosing one runs the game's own code for the
-move, which does not check that the Pokémon knows it (the badge is still needed).
-Only the first Pokémon's menu is changed.
+and CANCEL. The emulator adds field moves it does not know to that list, so
+FLASH, FLY, DIG and TELEPORT can be chosen from it (and, when there is room, DIVE
+in Emerald, then CUT, SURF, STRENGTH, ROCK SMASH and WATERFALL;
+`src/cheats/gen3/party_menu.rs`). The game's list holds eight entries and adds
+three after these, so as many are added as fit, in that order; a Pokémon that
+already lists its own field moves leaves room for fewer. The last five are also
+covered from the overworld by the cheat above, which is why they come last.
+Choosing an entry runs the game's own code for the move, which does not check
+that the Pokémon knows it (the HMs still need their badge; DIG and TELEPORT need
+none, only a place where they work). Only the first Pokémon's menu is changed.
 
 Checked on LeafGreen v1.1 from the save state in a dark cave: selecting the
-first Pokémon in the party menu lists SUMMARY, FLASH, FLY, CUT, SURF, ITEM and
-CANCEL; choosing FLASH plays the field-move animation and the cave is lit.
+first Pokémon in the party menu lists SUMMARY, FLASH, FLY, DIG, TELEPORT, SWITCH,
+ITEM and CANCEL; choosing FLASH plays the field-move animation and the cave is
+lit, and choosing DIG ("Escape from here.") takes the player out of the cave.
 Earlier, from the save state in front of a cuttable tree
 with no Pokémon knowing Cut: A on the tree says "This tree looks like it can
 be CUT" and offers "Would you like to CUT it?"; answering yes plays the field-move
