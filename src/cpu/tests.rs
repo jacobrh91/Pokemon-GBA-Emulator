@@ -786,6 +786,24 @@ fn bios_lz77_services_decompress_to_ram_and_vram() {
 }
 
 #[test]
+fn bios_lz77_treats_a_zeroed_header_as_empty_output() {
+    let (mut cpu, mut bus) = cpu_with_program(&[]);
+    let source = TEST_PROGRAM_ADDRESS + 0x100;
+    bus.iwram[0x100..0x108].fill(0);
+    cpu.set_cpsr(MODE_SYSTEM).unwrap();
+    cpu.enter_exception(MODE_SUPERVISOR, VECTOR_SWI, TEST_PROGRAM_ADDRESS + 2)
+        .unwrap();
+    cpu.registers[0] = source;
+    cpu.registers[1] = crate::mmu::EWRAM_START;
+    bus.write_u8(crate::mmu::EWRAM_START, 0x5A).unwrap();
+
+    cpu.handle_bios_swi(0x11, &mut bus).unwrap();
+
+    assert_eq!(cpu.registers[15], TEST_PROGRAM_ADDRESS + 2);
+    assert_eq!(bus.read_u8(crate::mmu::EWRAM_START).unwrap(), 0x5A);
+}
+
+#[test]
 fn bios_lz77_rejects_backreferences_before_output() {
     let (mut cpu, mut bus) = cpu_with_program(&[]);
     let source = TEST_PROGRAM_ADDRESS + 0x100;

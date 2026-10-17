@@ -411,14 +411,10 @@ fn compression_header(bus: &MemoryBus, source: u32) -> io::Result<(u8, usize)> {
     Ok(((header >> 4) as u8 & 0x0F, (header >> 8) as usize))
 }
 
+/// Like the real BIOS, takes the length from the header and does not check its
+/// type nibble: a game may hand over zeroed data (Emerald's player back picture
+/// table does), which decompresses to nothing.
 fn bios_lz77_decompress(bus: &MemoryBus, source: u32) -> io::Result<Vec<u8>> {
-    let header = bus.read_u8(source)?;
-    if header != 0x10 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid BIOS LZ77 header: {header:#04X}"),
-        ));
-    }
     let (_, output_length) = compression_header(bus, source)?;
     let mut output = Vec::new();
     output
