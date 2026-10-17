@@ -37,8 +37,7 @@ the window slides up a dock with volume, full screen and fast-forward.
 
 Open the cheat menu with **Tab** (or the CHEATS button in the dock). Each row has
 its own checkbox, takes effect at once, and is remembered for the next time you
-play that game. The cheats work on Pokémon **FireRed, LeafGreen and Emerald**; the
-game is recognised from its ROM, so no setup is needed.
+play that game.
 
 Switchable in the menu:
 
@@ -51,8 +50,7 @@ Switchable in the menu:
   traded one.
 - **Shiny chance:** from 1/1000 up to every Pokémon being shiny.
 - **No random encounters.**
-- **Max speed in battles:** runs flat out while a battle lasts (Emerald and
-  English FireRed / LeafGreen).
+- **Max speed in battles:** emulator runs as fast as possible during battles.
 - **Codes from a `.cheats` file:** CodeBreaker-style RAM codes placed beside the
   ROM, shown as a row when the file has any.
 
