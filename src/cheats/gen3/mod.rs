@@ -1,75 +1,58 @@
 //! Built-in cheats for Pokémon FireRed, LeafGreen and Emerald. Unlike the raw
-//! codes of a `.cheats` file (see [`super::codebreaker`]), which write
-//! constants into RAM, these act on the game's own code: each finds a place in
-//! the ROM by its instruction bytes (a *signature scan*) and the emulator
-//! changes a register or a value when the CPU reaches that address.
+//! codes of a `.cheats` file (see [`super::codebreaker`]), these act on the
+//! game's own code: each finds a place in the ROM by its instruction bytes (a
+//! *signature scan*), and the emulator changes a register or value when the CPU
+//! reaches it. Cheats marked *always on* have no menu row.
 //!
-//! [`battle`] is not a cheat but what the fast-battles option asks: whether a
-//! battle is on.
+//! | Mechanism | Cheats |
+//! |---|---|
+//! | A function's arguments at its entry | [`wild_species`] |
+//! | A value in the middle of a routine | [`catch_rate`], [`shiny`] (and [`perfect_stats`], at the same place), [`experience`], [`field_poison`] (always on) |
+//! | A function's return value | [`encounters`], [`money`] |
+//! | An argument just before a call | [`tm`] (always on) |
+//! | The answer of `MonKnowsMove` for the first party slot | [`field_moves`] (always on), with [`party_menu`] listing the moves in its START menu |
 //!
-//! The cheats, by what they change (the ones marked *always on* have no row in
-//! the menu):
-//!
-//! * [`wild_species`]: a function's arguments at its entry.
-//! * [`catch_rate`], [`shiny`], [`experience`], [`field_poison`]: a value in
-//!   the middle of a routine (the catch odds, a Pokémon's personality value, the
-//!   OT ID compared with the player's, the ailment tested by the poison check;
-//!   the last is *always on*). [`perfect_stats`] uses the same place as
-//!   [`shiny`], for the IVs.
-//! * [`encounters`], [`money`]: the value a function returns.
-//! * [`tm`]: an argument just before a call (*always on*).
-//! * [`field_moves`]: the answer of `MonKnowsMove` for the first party slot and
-//!   an HM move (*always on*); [`party_menu`] adds field moves to that
-//!   Pokémon's START-menu list of actions.
-//!
-//! This module holds what they share: recognising one of the cartridges, the
-//! scan, and the table of builds that were checked.
+//! [`battle`] is not a cheat: it says whether a battle is on, for the
+//! max-speed-in-battles row.
 //!
 //! # How a scan works
 //!
-//! 1. The ROM must be a FireRed, LeafGreen or Emerald cartridge: game code
-//!    `BPR?` (FireRed: `BPRE` English, `BPRJ` Japanese, …), `BPG?`
-//!    (LeafGreen: `BPGE`, …) or `BPE?` (Emerald: `BPEE`, …) in the header at
-//!    `0xAC`. FireRed and LeafGreen are the same game with a few data
-//!    differences, and Emerald's code is almost the same: most hooks are the
-//!    same bytes in all three. Where a game compiled the code differently, a
-//!    cheat lists one signature for each variant (see each module), so a
-//!    signature can only match the game it was written for.
-//! 2. Every 2-byte-aligned offset is compared with the pattern; bytes that
+//! 1. The header game code (`0xAC..0xB0`) must be `BPR?` (FireRed), `BPG?`
+//!    (LeafGreen) or `BPE?` (Emerald). The games share most of their code, so
+//!    most signatures match all three; where a game compiled a routine
+//!    differently, a cheat lists one signature per variant.
+//! 2. Every halfword-aligned offset is compared with the pattern; bytes that
 //!    differ between builds (`BL` targets, pool offsets) are wildcards.
-//! 3. There must be **exactly one** match (a cheat that has several places, such
-//!    as [`tm`], states how many it accepts). With none, or the wrong number,
-//!    nothing is hooked and the cheat reports itself unsupported rather than
-//!    guessing.
-//! 4. The hook address is `0x0800_0000` (where the ROM appears on the bus)
-//!    plus the match offset plus the offset of the instruction the cheat
-//!    cares about.
+//! 3. There must be **exactly one** match (cheats with several places state how
+//!    many they accept). Otherwise nothing is hooked and the cheat reports itself
+//!    unsupported rather than guessing.
+//! 4. The hook address is `0x0800_0000` plus the match offset plus the offset of
+//!    the instruction the cheat cares about.
 //!
-//! The scan runs once, when the ROM is opened.
+//! The scan runs once per ROM and is remembered in the settings file.
 //!
 //! # Known builds
 //!
-//! | Build | Game code | Version | CRC32 | `CreateWildMon` at | Catch check at | Checked |
-//! |---|---|---|---|---|---|---|
-//! | FireRed v1.0 (US) | `BPRE` | 0 | `7845FBDD` | `0x080829FC` | `0x0802D6BC` | encounter: Rattata → Dratini; catch: Lv100 Mewtwo caught first throw |
-//! | FireRed v1.1 (US) | `BPRE` | 1 | `84EE4776` | `0x08082A10` | `0x0802D6D0` | encounter: Pidgey → Dratini; catch: Lv100 Mewtwo caught first throw |
-//! | FireRed (Japan)   | `BPRJ` | 0 | `3B2056E9` | `0x080825E8` | `0x0802CE94` | encounter: Rattata → Dratini; catch: Lv100 Mewtwo caught first throw |
-//! | LeafGreen v1.1 (US) | `BPGE` | 1 | | `0x080829E4` | `0x0802D6D0` | wild species, shiny, no encounters live; all hooks found |
-//! | Emerald (USA, Europe) | `BPEE` | 0 | | `0x080B4E68` | `0x08056564` | all hooks found by disassembly; boots with every cheat on; **not yet checked in the game** |
+//! | Build | Game code | `CreateWildMon` at | Catch check at | Checked |
+//! |---|---|---|---|---|
+//! | FireRed v1.0 (US) | `BPRE` | `0x080829FC` | `0x0802D6BC` | encounter and catch, live |
+//! | FireRed v1.1 (US) | `BPRE` | `0x08082A10` | `0x0802D6D0` | encounter and catch, live |
+//! | FireRed (Japan) | `BPRJ` | `0x080825E8` | `0x0802CE94` | encounter and catch, live |
+//! | LeafGreen v1.1 (US) | `BPGE` | `0x080829E4` | `0x0802D6D0` | wild species, shiny, no encounters, live |
+//! | Emerald (USA, Europe) | `BPEE` | `0x080B4E68` | `0x08056564` | all hooks found; several tried live |
 //!
-//! The shiny cheat's hook (inside `CreateBoxMon`) is at `0x0803DB92` (v1.0),
-//! `0x0803DBA6` (v1.1) and `0x0803D2FE` (Japan); each was checked live from a
-//! save state in the grass.
-//!
-//! "Checked" says how far each build was verified live: a unique match shows
-//! the bytes are there, not that the code behaves the same.
-//!
-//! # Adding a build
-//!
-//! Run the emulator on the ROM with the cheat on; the terminal reports the
-//! address hooked, or why none was. A build whose code was compiled
-//! differently has no match and is declined; for one with rewritten code,
-//! trace the game (see each cheat's notes) and add its own signature.
+//! "Checked" says how far a build was verified: a unique match shows the bytes
+//! are there, not that the code behaves the same. To add a build, run it with the
+//! cheat on (the terminal reports the address hooked, or why none was); a build
+//! with rewritten code needs its own signature.
+
+/// An array of bytes to match, for a [`Signature`]: numbers match themselves
+/// and `_` matches any byte.
+macro_rules! pattern {
+    (@byte _) => { None };
+    (@byte $byte:expr) => { Some($byte) };
+    ($($byte:tt),+ $(,)?) => { [$(pattern!(@byte $byte)),+] };
+}
 
 pub mod battle;
 pub mod catch_rate;
@@ -108,17 +91,6 @@ pub(crate) struct Signature {
     pub bytes: &'static [Option<u8>],
     /// Offset within `bytes` of the hooked instruction.
     pub hook_offset: usize,
-}
-
-/// A pattern with no wildcards.
-pub(crate) const fn exact<const N: usize>(bytes: [u8; N]) -> [Option<u8>; N] {
-    let mut out = [None; N];
-    let mut index = 0;
-    while index < N {
-        out[index] = Some(bytes[index]);
-        index += 1;
-    }
-    out
 }
 
 impl Signature {
@@ -280,11 +252,6 @@ mod tests {
         // Exercised on a small pattern here; each module runs the same checks
         // on its own signature.
         test_support::assert_single_match_rules(|rom| PATTERN.find(rom), &PATTERN);
-    }
-
-    #[test]
-    fn exact_has_no_wildcards() {
-        assert_eq!(exact([1, 2, 3]), [Some(1), Some(2), Some(3)]);
     }
 
     #[test]

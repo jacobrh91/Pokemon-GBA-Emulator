@@ -1,19 +1,17 @@
 //! The infinite-money cheat: the balance the game sees is always 999,999.
 //!
-//! **Mechanism: replace a value at the end of a routine.** `GetMoney(&money)`
-//! is the one function every reader of the balance goes through; the emulator
-//! stops at its `bx lr` and sets `r0`, the returned balance, to 999,999 (see
-//! `Emulator::step`). The shop's money box, `IsEnoughMoney` and the quantity
-//! prompt (capped by the game's own limit of 99) all see it.
+//! **Mechanism: replace a value at the end of a routine.** `GetMoney(&money)` is
+//! the one function every reader of the balance goes through; the emulator stops
+//! at its `bx lr` and sets `r0`, the returned balance, to 999,999. The shop's
+//! money box, `IsEnoughMoney` and the quantity prompt all see it.
 //!
 //! Purchases, `AddMoney` and whiteouts start from the shown balance and write
-//! the result back, so the real balance becomes 999,999 minus the price of
-//! whatever was bought: nearly the most the game allows once the cheat is off.
+//! the result back, so the real balance becomes 999,999 minus whatever was spent.
 //!
 //! # Finding it
 //!
-//! `GetMoney` is a leaf function of nine instructions that decrypts the
-//! stored balance with the save's encryption key:
+//! `GetMoney` is a leaf function that decrypts the stored balance with the
+//! save's key:
 //!
 //! ```text
 //! 04 49  ldr  r1, [pc, #0x10]     r1 = &gSaveBlock2Ptr
@@ -27,11 +25,11 @@
 //! 70 47  bx   lr                  <- the hook
 //! ```
 //!
-//! These bytes also occur twice elsewhere in the ROM, so they cannot identify
-//! the function. `IsEnoughMoney` can: its bytes are unique and it begins by
-//! calling `GetMoney`. The scan finds `IsEnoughMoney` (see
-//! `IS_ENOUGH_SIGNATURE`), decodes the target of its `BL`, checks that the
-//! target's bytes are the ones above, and hooks the `bx lr` 16 bytes in.
+//! These bytes occur twice elsewhere in the ROM, so they cannot identify the
+//! function. `IsEnoughMoney` can: its bytes are unique and it begins by calling
+//! `GetMoney`. The scan finds `IsEnoughMoney` (`IS_ENOUGH_SIGNATURE`), decodes
+//! its `BL` target, checks the target's bytes against the above, and hooks the
+//! `bx lr` 16 bytes in.
 
 use super::{ROM_BASE, Signature};
 
@@ -42,31 +40,9 @@ pub(crate) const SHOWN_BALANCE: u32 = 999_999;
 /// GetMoney; cmp r0, r4; bhs +1; movs r0, #0; b +0; movs r0, #1; pop {r4};
 /// pop {r1}; bx r1`. `None` is the wildcard of the `BL`.
 pub(crate) const IS_ENOUGH_SIGNATURE: Signature = Signature::new(
-    &[
-        Some(0x10),
-        Some(0xB5),
-        Some(0x0C),
-        Some(0x1C),
-        None,
-        None,
-        None,
-        None,
-        Some(0xA0),
-        Some(0x42),
-        Some(0x01),
-        Some(0xD2),
-        Some(0x00),
-        Some(0x20),
-        Some(0x00),
-        Some(0xE0),
-        Some(0x01),
-        Some(0x20),
-        Some(0x10),
-        Some(0xBC),
-        Some(0x02),
-        Some(0xBC),
-        Some(0x08),
-        Some(0x47),
+    &pattern![
+        0x10, 0xB5, 0x0C, 0x1C, _, _, _, _, 0xA0, 0x42, 0x01, 0xD2, 0x00, 0x20, 0x00, 0xE0, 0x01,
+        0x20, 0x10, 0xBC, 0x02, 0xBC, 0x08, 0x47,
     ],
     0,
 );

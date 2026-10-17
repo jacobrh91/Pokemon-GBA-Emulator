@@ -61,6 +61,19 @@ impl Default for Settings {
     }
 }
 
+/// The cheat switches saved as plain `key = true` lines.
+type Switch = fn(&mut CheatOptions) -> &mut bool;
+const CHEAT_SWITCHES: [(&str, Switch); 6] = [
+    ("cheat_shiny", |options| &mut options.shiny),
+    ("cheat_infinite_money", |options| {
+        &mut options.infinite_money
+    }),
+    ("cheat_catch_always", |options| &mut options.catch_always),
+    ("cheat_no_encounters", |options| &mut options.no_encounters),
+    ("cheat_exp_boost", |options| &mut options.exp_boost),
+    ("cheat_fast_battles", |options| &mut options.fast_battles),
+];
+
 impl Settings {
     /// Where the settings for `rom` live: beside it, with a `.settings`
     /// extension.
@@ -99,6 +112,10 @@ impl Settings {
                 continue;
             };
             let (key, value) = (key.trim(), value.trim());
+            if let Some((_, switch)) = CHEAT_SWITCHES.iter().find(|(name, _)| *name == key) {
+                set_flag(value, switch(&mut settings.cheat_options));
+                continue;
+            }
             match key {
                 "volume" => {
                     if let Ok(volume) = value.parse::<f32>()
@@ -122,7 +139,6 @@ impl Settings {
                         settings.state_jitter_frames = frames.min(MAX_STATE_JITTER_FRAMES);
                     }
                 }
-                "cheat_shiny" => set_flag(value, &mut settings.cheat_options.shiny),
                 "cheat_shiny_odds" => {
                     // "10" or "1/10": one in ten.
                     let number = value.strip_prefix("1/").unwrap_or(value);
@@ -139,13 +155,6 @@ impl Settings {
                 }
                 "cheat_perfect_wild" => set_flag(value, &mut legacy_wild),
                 "cheat_perfect_opponent" => set_flag(value, &mut legacy_opponents),
-                "cheat_infinite_money" => {
-                    set_flag(value, &mut settings.cheat_options.infinite_money)
-                }
-                "cheat_catch_always" => set_flag(value, &mut settings.cheat_options.catch_always),
-                "cheat_no_encounters" => set_flag(value, &mut settings.cheat_options.no_encounters),
-                "cheat_exp_boost" => set_flag(value, &mut settings.cheat_options.exp_boost),
-                "cheat_fast_battles" => set_flag(value, &mut settings.cheat_options.fast_battles),
                 "cheat_wild_enabled" => {
                     wild_switch_seen = true;
                     set_flag(value, &mut settings.cheat_options.wild_enabled);
@@ -209,18 +218,11 @@ impl Settings {
     fn cheat_options_text(&self) -> String {
         let options = &self.cheat_options;
         let mut text = String::new();
-        let mut flag = |key: &str, on: bool| {
-            if on {
+        for (key, switch) in CHEAT_SWITCHES {
+            if *switch(&mut options.clone()) {
                 text.push_str(&format!("{key} = true\n"));
             }
-        };
-        flag("cheat_shiny", options.shiny);
-
-        flag("cheat_infinite_money", options.infinite_money);
-        flag("cheat_catch_always", options.catch_always);
-        flag("cheat_no_encounters", options.no_encounters);
-        flag("cheat_exp_boost", options.exp_boost);
-        flag("cheat_fast_battles", options.fast_battles);
+        }
         if options.shiny_odds != ShinyOdds::default() {
             text.push_str(&format!(
                 "cheat_shiny_odds = {}\n",

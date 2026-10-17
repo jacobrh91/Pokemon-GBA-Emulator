@@ -1,30 +1,27 @@
-//! The real-time clock of the Pokémon Ruby, Sapphire and Emerald cartridges
-//! (an Seiko S-3511A on the cartridge's GPIO port), set to the clock of the
-//! machine the emulator runs on.
+//! The real-time clock of the Pokémon Ruby, Sapphire and Emerald cartridges (a
+//! Seiko S-3511A on the cartridge's GPIO port), showing the host machine's
+//! local time.
 //!
 //! The chip is wired to three pins of a GPIO port that overlays the ROM at
 //! offsets `0xC4..=0xC9`: `SCK` (bit 0), `SIO` (bit 1) and `CS` (bit 2) of the
-//! data register at `0xC4`, the direction of each pin at `0xC6` (1 = the
-//! console drives it) and, at `0xC8`, whether the port can be read (otherwise
-//! the ROM's own bytes show; the games turn it on once, when they start, so it
-//! is on from the beginning here: the port is not part of a save state, and a
-//! game restored from one would otherwise never see the chip). The game talks
-//! to it bit by bit:
+//! data register at `0xC4`; the direction of each pin at `0xC6` (1 = the console
+//! drives it); and at `0xC8` whether the port can be read (otherwise the ROM's
+//! bytes show). The games enable reading once at start-up. Here it is on from
+//! the beginning, since the port is not part of a save state and a restored game
+//! would otherwise never see the chip. A transfer goes bit by bit:
 //!
-//! 1. `CS` goes high: a transfer begins.
-//! 2. An 8-bit command is sent, most significant bit first, a bit being taken
-//!    on each rising edge of `SCK`: `0110`, a 3-bit register number, then 1 to
-//!    read the register or 0 to write it.
-//! 3. The register's bytes follow, least significant bit first: sent by the
-//!    game (taken on rising edges) or by the chip (changing on falling edges,
-//!    so that they can be read once `SCK` has risen).
-//! 4. `CS` goes low: the transfer ends.
+//! 1. `CS` goes high.
+//! 2. An 8-bit command is sent most significant bit first, a bit per rising edge
+//!    of `SCK`: `0110`, a 3-bit register number, then 1 to read or 0 to write.
+//! 3. The register's bytes follow, least significant bit first: sent by the game
+//!    (taken on rising edges) or by the chip (changing on falling edges, so they
+//!    can be read once `SCK` has risen).
+//! 4. `CS` goes low.
 //!
 //! Registers: 0 reset, 1 status, 2 date and time (year, month, day, weekday,
-//! hour, minute, second, in BCD), 3 time (the last three), 4 and 5 alarms.
-//! The status keeps the 24-hour flag; the power-failure flag, which makes the
-//! games say the cartridge's battery has run dry, is never set. The date and
-//! time cannot be set: they are always the host's.
+//! hour, minute, second, in BCD), 3 time (the last three), 4 and 5 alarms. The
+//! status keeps the 24-hour flag; the power-failure flag, which makes the games
+//! say the battery has run dry, is never set. The date and time cannot be set.
 
 /// The first and last byte offsets of the GPIO port within the cartridge.
 const GPIO_FIRST: usize = 0xC4;

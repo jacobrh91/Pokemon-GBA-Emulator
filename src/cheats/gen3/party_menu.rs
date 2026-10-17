@@ -1,40 +1,33 @@
-//! The party menu's list of actions for the first Pokémon includes field moves
-//! it does not know, so they can be chosen from the START menu: Flash in a dark
-//! cave, Fly to a town, Dig and Teleport to get out of somewhere, and the other
-//! HMs when there is room. Part of the always-on "first Pokémon knows every HM"
-//! cheat (see [`super::field_moves`], which covers the game's own checks).
+//! Lists field moves the first Pokémon does not know in its party-menu actions,
+//! so Flash, Fly, Dig, Teleport and the HMs can be chosen from the START menu.
+//! Part of the always-on "first Pokémon knows every HM" cheat (see
+//! [`super::field_moves`], which covers the game's own checks).
 //!
 //! **Mechanism: change a list the game has just built.** When a Pokémon is
-//! selected in the party menu, `SetPartyMonFieldSelectionActions` builds the
-//! menu: SUMMARY, then one entry for each field move among the Pokémon's four
-//! moves, then SWITCH, ITEM (or MAIL) and CANCEL. Each entry is a byte in a list
-//! of eight (`actions`) and a count (`numActions`), both inside a structure the
-//! game allocates. Two hooks:
+//! selected, `SetPartyMonFieldSelectionActions` builds the menu: SUMMARY, one
+//! entry per field move among the Pokémon's four moves, then SWITCH, ITEM (or
+//! MAIL) and CANCEL. The entries are bytes in a list of eight plus a count, in a
+//! structure the game allocates. Two hooks:
 //!
 //! * **Capture**, at the first `bl AppendToList` (the one that adds SUMMARY):
-//!   `r0` and `r1` are the addresses of the list and of the count, and `r10`
-//!   holds which party slot was selected. They are kept if it is slot 0.
-//! * **Append**, right after the loops over the Pokémon's moves, before SWITCH
-//!   is added: the emulator adds the field-move entries for the HMs that are
-//!   not already there. [`extra_actions`] decides which.
+//!   `r0` and `r1` are the addresses of the list and count, `r10` the selected
+//!   slot. They are kept for slot 0.
+//! * **Append**, after the loops over the moves, before SWITCH is added: the
+//!   emulator adds entries for the HMs not already listed ([`extra_actions`]).
 //!
-//! The list holds eight entries and the game adds up to three more after the
-//! second hook, so at most five (SUMMARY and the field moves) may be in it at
-//! that point; entries are added only while there is room, in the order Flash,
-//! Fly, Dig, Teleport, Dive (Emerald), Cut, Surf, Strength, Rock Smash,
-//! Waterfall. The ones that can only be used from this menu come first; Cut,
-//! Surf, Strength, Rock Smash and Waterfall also work from the overworld
-//! through [`super::field_moves`], so they are last.
-//!
-//! Choosing the entry runs the game's own code for the move, which does not
-//! check that the Pokémon knows it (the HMs need their badge, as ever; Dig and
-//! Teleport need none, only a place where they work).
+//! The game adds up to three more entries after the second hook, so at most five
+//! may be in the list then; entries are added while there is room, in the order
+//! Flash, Fly, Dig, Teleport, Dive (Emerald), Cut, Surf, Strength, Rock Smash,
+//! Waterfall. Those that only work from this menu come first; the rest also work
+//! from the overworld through [`super::field_moves`]. Choosing an entry runs the
+//! game's own code for the move, which does not check that the Pokémon knows it
+//! (HMs still need their badge; Dig and Teleport need none).
 //!
 //! # The signatures
 //!
-//! The code is the same in FireRed, LeafGreen and Emerald except for the count
-//! of field moves in the loop (12 against 14) and the number of the first
-//! field-move entry (0x12 against 0x13), which is what tells the games apart:
+//! FireRed, LeafGreen and Emerald differ only in the count of field moves in the
+//! loop (12 against 14) and the number of the first field-move entry (0x12
+//! against 0x13), which tells the games apart:
 //!
 //! ```text
 //! capture:  ldr r2, [pc, #..] ; ldr r1, [r2] ; movs r0, #0 ; strb r0, [r1, #0x17]
@@ -82,12 +75,11 @@ impl Layout {
         }
     }
 
-    /// The indexes (in the game's table of field moves) of the moves that are
-    /// offered, in the order they are offered. The game's tables are, for
-    /// FireRed and LeafGreen: Flash 0, Cut 1, Fly 2, Strength 3, Surf 4, Rock
-    /// Smash 5, Waterfall 6, Teleport 7, Dig 8; and for Emerald: Cut 0, Flash 1,
-    /// Rock Smash 2, Strength 3, Surf 4, Fly 5, Dive 6, Waterfall 7, Teleport 8,
-    /// Dig 9.
+    /// The indexes (in the game's table of field moves) of the moves offered,
+    /// in the order offered. The tables are: FireRed and LeafGreen: Flash 0,
+    /// Cut 1, Fly 2, Strength 3, Surf 4, Rock Smash 5, Waterfall 6, Teleport 7,
+    /// Dig 8; Emerald: Cut 0, Flash 1, Rock Smash 2, Strength 3, Surf 4, Fly 5,
+    /// Dive 6, Waterfall 7, Teleport 8, Dig 9.
     fn offered_indexes(self) -> &'static [u8] {
         match self {
             // Flash, Fly, Dig, Teleport, Cut, Surf, Strength, Rock Smash,
@@ -117,29 +109,9 @@ const ADDED_AFTER: usize = 3;
 
 /// The capture hook: its `bl AppendToList`. `None` is a wildcard.
 pub(crate) const CAPTURE: Signature = Signature::new(
-    &[
-        None,
-        Some(0x4A),
-        Some(0x11),
-        Some(0x68),
-        Some(0x00),
-        Some(0x20),
-        Some(0xC8),
-        Some(0x75),
-        Some(0x11),
-        Some(0x68),
-        Some(0x08),
-        Some(0x1C),
-        Some(0x0F),
-        Some(0x30),
-        Some(0x17),
-        Some(0x31),
-        Some(0x00),
-        Some(0x22),
-        None,
-        None,
-        None,
-        None,
+    &pattern![
+        _, 0x4A, 0x11, 0x68, 0x00, 0x20, 0xC8, 0x75, 0x11, 0x68, 0x08, 0x1C, 0x0F, 0x30, 0x17,
+        0x31, 0x00, 0x22, _, _, _, _,
     ],
     18,
 );
@@ -147,33 +119,9 @@ pub(crate) const CAPTURE: Signature = Signature::new(
 /// The end of the loop over the field moves; `count` is the number of them in
 /// the game's table (the `cmp r0, #count`).
 const fn append_signature(count: u8) -> [Option<u8>; 26] {
-    [
-        Some(0x60),
-        Some(0x1C),
-        Some(0x00),
-        Some(0x06),
-        Some(0x04),
-        Some(0x0E),
-        Some(0x60),
-        Some(0x00),
-        Some(0x40),
-        Some(0x19),
-        Some(0x00),
-        Some(0x88),
-        Some(count),
-        Some(0x28),
-        None,
-        Some(0xD1),
-        Some(0x41),
-        Some(0x46),
-        Some(0x08),
-        Some(0x06),
-        Some(0x07),
-        Some(0x0E),
-        Some(0x03),
-        Some(0x2F),
-        None,
-        Some(0xD9),
+    pattern![
+        0x60, 0x1C, 0x00, 0x06, 0x04, 0x0E, 0x60, 0x00, 0x40, 0x19, 0x00, 0x88, count, 0x28, _,
+        0xD1, 0x41, 0x46, 0x08, 0x06, 0x07, 0x0E, 0x03, 0x2F, _, 0xD9,
     ]
 }
 

@@ -12,6 +12,7 @@
 //! | all experience is boosted | |
 //! | shiny chance | stepper 1/1 … 1/1000 |
 //! | no random encounters | |
+//! | max speed in battles | |
 //! | TMs are infinitely usable | none: always on, shown ticked |
 //! | the first Pokémon knows every HM | none: always on, shown ticked |
 //! | no poison damage outside battle | none: always on, shown ticked |
@@ -387,6 +388,22 @@ impl MenuLayout {
     }
 }
 
+/// Flips the switch of `row` (the wild row's switch is its checkbox).
+fn toggle_row(options: &mut CheatOptions, row: FocusRow) {
+    let switch = match row {
+        FocusRow::FileCodes => &mut options.file_codes,
+        FocusRow::Wild => &mut options.wild_enabled,
+        FocusRow::Perfect => &mut options.perfect_enabled,
+        FocusRow::Money => &mut options.infinite_money,
+        FocusRow::Catch => &mut options.catch_always,
+        FocusRow::Experience => &mut options.exp_boost,
+        FocusRow::Shiny => &mut options.shiny,
+        FocusRow::NoEncounters => &mut options.no_encounters,
+        FocusRow::FastBattles => &mut options.fast_battles,
+    };
+    *switch = !*switch;
+}
+
 pub(super) struct CheatMenu {
     open: bool,
     options: CheatOptions,
@@ -450,6 +467,13 @@ impl CheatMenu {
             FocusRow::FastBattles,
         ]);
         rows
+    }
+
+    /// The row whose checkbox (with some margin) is under the point.
+    fn row_checkbox_at(&self, layout: &MenuLayout, x: f32, y: f32) -> Option<FocusRow> {
+        self.focus_rows()
+            .into_iter()
+            .find(|row| layout.checkbox_of(*row).inflated(4).contains(x, y))
     }
 
     /// The row that has the keyboard focus, if it is to be drawn.
@@ -552,9 +576,8 @@ impl CheatMenu {
                 }
             }
             MenuNav::Toggle => match row {
-                FocusRow::FileCodes => options.file_codes = !options.file_codes,
                 FocusRow::Wild => match self.wild_part {
-                    WildPart::Enable => options.wild_enabled = !options.wild_enabled,
+                    WildPart::Enable => toggle_row(&mut options, row),
                     WildPart::Species => {
                         self.dropdown_open = true;
                         self.list_cursor = Some(self.selected_row());
@@ -568,13 +591,7 @@ impl CheatMenu {
                     }
                     WildPart::LevelClear => options.wild_level = None,
                 },
-                FocusRow::Perfect => options.perfect_enabled = !options.perfect_enabled,
-                FocusRow::Money => options.infinite_money = !options.infinite_money,
-                FocusRow::Catch => options.catch_always = !options.catch_always,
-                FocusRow::Experience => options.exp_boost = !options.exp_boost,
-                FocusRow::Shiny => options.shiny = !options.shiny,
-                FocusRow::NoEncounters => options.no_encounters = !options.no_encounters,
-                FocusRow::FastBattles => options.fast_battles = !options.fast_battles,
+                row => toggle_row(&mut options, row),
             },
             MenuNav::Back => {}
         }
@@ -773,25 +790,12 @@ impl CheatMenu {
 
         let mut options = self.options;
         if pressed && over_panel {
-            if layout.shiny.inflated(4).contains(x, y) {
-                options.shiny = !options.shiny;
+            if let Some(row) = self.row_checkbox_at(layout, x, y) {
+                toggle_row(&mut options, row);
             } else if layout.shiny_minus.contains(x, y) {
                 options.shiny_odds = options.shiny_odds.stepped(-1);
             } else if layout.shiny_plus.contains(x, y) {
                 options.shiny_odds = options.shiny_odds.stepped(1);
-            } else if layout.no_encounters.inflated(4).contains(x, y) {
-                options.no_encounters = !options.no_encounters;
-            } else if layout.fast_battles.inflated(4).contains(x, y) {
-                options.fast_battles = !options.fast_battles;
-            } else if layout
-                .file_codes
-                .is_some_and(|r| r.inflated(4).contains(x, y))
-            {
-                options.file_codes = !options.file_codes;
-            } else if layout.wild_enable.inflated(4).contains(x, y) {
-                options.wild_enabled = !options.wild_enabled;
-            } else if layout.perfect_enable.inflated(4).contains(x, y) {
-                options.perfect_enabled = !options.perfect_enabled;
             } else if layout.dropdown.contains(x, y) {
                 self.dropdown_open = true;
                 self.scroll_to_selection();
@@ -805,12 +809,6 @@ impl CheatMenu {
                 options.wild_level = None;
             } else if layout.perfect_dropdown.contains(x, y) {
                 self.perfect_list_open = true;
-            } else if layout.money.inflated(4).contains(x, y) {
-                options.infinite_money = !options.infinite_money;
-            } else if layout.catch.inflated(4).contains(x, y) {
-                options.catch_always = !options.catch_always;
-            } else if layout.exp_boost.inflated(4).contains(x, y) {
-                options.exp_boost = !options.exp_boost;
             }
         }
 

@@ -1,35 +1,28 @@
-//! The wild-encounter override: every wild Pokémon is the chosen species at
-//! the chosen level.
+//! The wild-encounter override: every wild Pokémon is the chosen species at the
+//! chosen level.
 //!
-//! **Mechanism: replace a function's arguments at its entry.** The emulator
-//! stops at the first instruction of `CreateWildMon`, which builds every wild
-//! encounter (grass, surfing, fishing, rock smash), and rewrites `r0`
-//! (species) and `r1` (level) (see `Emulator::step`). The function's address
-//! differs between builds, so it is found by what it looks like (see
-//! [`super`]).
+//! **Mechanism: replace a function's arguments at its entry.** The emulator stops
+//! at the first instruction of `CreateWildMon`, which builds every wild encounter
+//! (grass, surfing, fishing, rock smash), and rewrites `r0` (species) and `r1`
+//! (level). Its address differs between builds, so it is found by its bytes.
 //!
-//! # The signature
-//!
-//! The function begins with these 16 bytes (eight little-endian Thumb
-//! instructions), identical in every FireRed and LeafGreen build examined:
+//! FireRed and LeafGreen begin the function with these 16 bytes, which are only
+//! register moves and shifts (no `BL` or PC-relative load) and so do not change
+//! between builds:
 //!
 //! ```text
-//! 70 B5   push {r4, r5, r6, lr}      save registers
-//! 84 B0   sub  sp, #0x10             room for locals
+//! 70 B5   push {r4, r5, r6, lr}
+//! 84 B0   sub  sp, #0x10
 //! 00 04   lsls r0, r0, #16  ┐
-//! 04 0C   lsrs r4, r0, #16  ┘        r4 = (u16) argument 0   (the species)
+//! 04 0C   lsrs r4, r0, #16  ┘        r4 = (u16) species
 //! 09 06   lsls r1, r1, #24  ┐
-//! 0E 0E   lsrs r6, r1, #24  ┘        r6 = (u8)  argument 1   (the level)
+//! 0E 0E   lsrs r6, r1, #24  ┘        r6 = (u8)  level
 //! 12 06   lsls r2, r2, #24  ┐
 //! 15 0E   lsrs r5, r2, #24  ┘        r5 = (u8)  argument 2
 //! ```
 //!
-//! These bytes are only register moves and shifts, with no `BL` or
-//! PC-relative `LDR`, so they do not change between builds. The hook address
-//! is the match itself, the function's entry.
-//!
-//! Emerald's `CreateWildMon` takes two arguments (no slot), so it begins
-//! differently; the species and level are still `r0` and `r1`:
+//! Emerald's takes two arguments (no slot), so it begins differently; species
+//! and level are still `r0` and `r1`:
 //!
 //! ```text
 //! F0 B5   push {r4, r5, r6, r7, lr}
@@ -42,44 +35,25 @@
 //! 01 22   movs r2, #1
 //! ```
 //!
-//! # Checking a build
-//!
-//! Walk in grass with the wild row on and look at the enemy species. For a
-//! build with a rewritten prologue, trace an encounter (the call chain ends
-//! in `CreateMon` with the species in `r1`) and add its own signature.
+//! For a build with a rewritten prologue, trace an encounter (the call chain
+//! ends in `CreateMon` with the species in `r1`) and add its own signature.
 
-use super::{Signature, exact, find_variant};
+use super::{Signature, find_variant};
 
 /// The function's opening bytes; the hook is its entry point.
 pub(crate) const SIGNATURE: Signature = Signature::new(
-    &exact([
+    &pattern![
         0x70, 0xB5, 0x84, 0xB0, 0x00, 0x04, 0x04, 0x0C, 0x09, 0x06, 0x0E, 0x0E, 0x12, 0x06, 0x15,
         0x0E,
-    ]),
+    ],
     0,
 );
 
 /// `CreateWildMon` in Emerald, whose prologue differs; the hook is its entry.
 pub(crate) const EMERALD_SIGNATURE: Signature = Signature::new(
-    &[
-        Some(0xF0),
-        Some(0xB5),
-        Some(0x83),
-        Some(0xB0),
-        Some(0x00),
-        Some(0x04),
-        Some(0x06),
-        Some(0x0C),
-        Some(0x09),
-        Some(0x06),
-        Some(0x0F),
-        Some(0x0E),
-        None,
-        None,
-        None,
-        None,
-        Some(0x01),
-        Some(0x22),
+    &pattern![
+        0xF0, 0xB5, 0x83, 0xB0, 0x00, 0x04, 0x06, 0x0C, 0x09, 0x06, 0x0F, 0x0E, _, _, _, _, 0x01,
+        0x22,
     ],
     0,
 );

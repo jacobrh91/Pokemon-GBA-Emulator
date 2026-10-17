@@ -12,6 +12,7 @@ use audio_output::AudioOutput;
 use dock::{Dock, MenuNav, Pointer, SpeedSetting};
 use emulation_thread::{STATE_LOAD, STATE_LOADED, STATE_SAVE, STATE_SAVED, Shared, emulation_loop};
 use gba_emulator::cheats::Cheats;
+use gba_emulator::cheats::options::CheatOptions;
 use gba_emulator::emulator::Emulator;
 use gba_emulator::game_library;
 use gba_emulator::mmu::ROM_START;
@@ -52,79 +53,10 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
             Settings::default()
         }
     };
-    // The settings remember where the cheats hook in this ROM, so the
-    // signature scan only runs the first time (or after the ROM changes).
-    let mut emulator = Emulator::with_cheat_scan(rom_path, settings.cheat_scan.as_ref())?;
+    let emulator = start_emulator(rom_path, save_path, &settings)?;
     let cheat_scan = emulator.cheat_scan();
-    emulator.initialize_gba_startup(ROM_START)?;
-    let cheats_path = Cheats::path_for_rom(Path::new(rom_path));
-    match Cheats::load(&cheats_path) {
-        Ok(cheats) => {
-            if cheats.write_count() > 0 || cheats.master_line_count() > 0 {
-                let when = match cheats.hook_address() {
-                    Some(address) => format!("when the game reaches {address:#010X}"),
-                    None => "every frame".to_owned(),
-                };
-                eprintln!(
-                    "cheats {}: {} code write(s), applied {when} once the \"CHEATS FILE\" row of the cheat menu (Tab) is ticked",
-                    cheats_path.display(),
-                    cheats.write_count(),
-                );
-            }
-            for warning in cheats.warnings() {
-                eprintln!("cheats {}: {warning}", cheats_path.display());
-            }
-            emulator.set_cheats(cheats);
-        }
-        Err(error) => eprintln!("could not read cheats {}: {error}", cheats_path.display()),
-    }
-    if let Some(image) = game_library::read_save(save_path)? {
-        emulator.load_save(&image);
-        eprintln!("loaded save {}", save_path.display());
-    }
-    eprintln!(
-        "backup memory: {:?}, save file {}",
-        emulator.save_kind(),
-        save_path.display()
-    );
 
-    // Reopen at the size the window had last time (kept at the 3:2 ratio).
-    let (initial_width, initial_height) =
-        settings
-            .window_size
-            .map_or((WINDOW_WIDTH, WINDOW_HEIGHT), |(width, _)| {
-                let width = width as usize;
-                (
-                    width,
-                    (width * WINDOW_HEIGHT + WINDOW_WIDTH / 2) / WINDOW_WIDTH,
-                )
-            });
-
-    let mut window = Window::new(
-        "GBA Emulator",
-        initial_width,
-        initial_height,
-        WindowOptions {
-            scale: Scale::X1,
-            // Resizable, with the picture scaled uniformly (bars, not
-            // stretching, when the window's shape differs).
-            resize: true,
-            scale_mode: ScaleMode::AspectRatioStretch,
-            ..WindowOptions::default()
-        },
-    )?;
-    // Native extras minifb lacks: keep the window frame itself at 3:2 while
-    // resizing, set a minimum size, and allow full screen.
-    window_control::lock_aspect_ratio(
-        &window,
-        WINDOW_WIDTH,
-        WINDOW_HEIGHT,
-        WINDOW_WIDTH / 2,
-        WINDOW_HEIGHT / 2,
-    );
-    window_control::enable_fullscreen(&window);
-    // The window runs at the display's pace; emulation runs on its own thread.
-    window.set_target_fps(60);
+    let mut window = open_window(&settings)?;
 
     let audio = match AudioOutput::new() {
         Ok(audio) => Some(audio),
@@ -154,23 +86,8 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
             .spawn(move || emulation_loop(emulator, sink, &shared, &save_path, &state_path))?
     };
 
-    // The cheats file's `wild_species` line preselects the menu's species
-    // (when none was saved); the row's checkbox is what turns it on.
     let mut cheat_options = settings.cheat_options;
-    if cheat_options.wild_species.is_none()
-        && let Some(species) = file_wild_species
-    {
-        cheat_options.wild_species = Some(species);
-        let name = gba_emulator::cheats::species::name(species).unwrap_or("?");
-        match wild_hook {
-            Some(address) => eprintln!(
-                "cheats: the cheats file sets the wild species to {name} ({species}); tick its checkbox in the cheat menu (Tab) to use it (found CreateWildMon at {address:#010X})"
-            ),
-            None => eprintln!(
-                "cheats: the cheats file sets the wild species to {name}, but this ROM is not a FireRed, LeafGreen or Emerald build whose wild-encounter function can be found"
-            ),
-        }
-    }
+    preselect_file_wild_species(&mut cheat_options, file_wild_species, wild_hook);
     let mut dock = Dock::new(settings.volume);
     dock.set_file_codes_available(file_codes);
     dock.set_cheat_options(cheat_options);
@@ -207,42 +124,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
                 EscapeAction::Quit => break,
             }
         }
-        if window.is_key_pressed(CHEAT_MENU_KEY, minifb::KeyRepeat::No) {
-            dock.toggle_menu();
-        }
-        if window.is_key_pressed(SAVE_STATE_KEY, minifb::KeyRepeat::No) {
-            shared.state_request.store(STATE_SAVE, Ordering::Relaxed);
-        }
-        if window.is_key_pressed(LOAD_STATE_KEY, minifb::KeyRepeat::No) {
-            shared.state_request.store(STATE_LOAD, Ordering::Relaxed);
-        }
-        // While the cheat menu is open the movement keys drive it, and the
-        // game sees no buttons.
-        if dock.menu_open() {
-            for (key, nav, repeats) in MENU_KEYS {
-                let repeat = if repeats {
-                    minifb::KeyRepeat::Yes
-                } else {
-                    minifb::KeyRepeat::No
-                };
-                if window.is_key_pressed(key, repeat) {
-                    dock.menu_navigate(nav);
-                }
-            }
-        }
-        dock.menu_hold_toggle(
-            dock.menu_open()
-                && MENU_KEYS
-                    .iter()
-                    .any(|(key, nav, _)| *nav == MenuNav::Toggle && window.is_key_down(*key)),
-        );
-        shared.buttons.store(
-            button_gate.apply(
-                dock.menu_open(),
-                buttons_from_keys(|key| window.is_key_down(key)),
-            ),
-            Ordering::Relaxed,
-        );
+        handle_keys(&window, &mut dock, &shared, &mut button_gate);
 
         let fast_forwarding = fast_forward_held(|key| window.is_key_down(key));
         shared
@@ -254,31 +136,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         upscale(&frame_pixels, &mut display_buffer);
 
-        // Map the mouse back to the 960x640 buffer the dock is drawn in, using
-        // the window system's position (minifb's is wrong in full screen).
-        let buffer_size = (WINDOW_WIDTH, WINDOW_HEIGHT);
-        let position = match window_control::pointer_in_picture_view(&window) {
-            Some((pointer, view_size)) => {
-                window_control::pointer_in_buffer(Some(pointer), view_size, buffer_size)
-            }
-            None => {
-                let (width, height) = window.get_size();
-                window_control::pointer_in_buffer(
-                    window.get_mouse_pos(MouseMode::Pass),
-                    (width as f32, height as f32),
-                    buffer_size,
-                )
-            }
-        };
-        let pointer = Pointer {
-            position,
-            // The window system's button state also covers clicks the window
-            // never received because it was not key yet (just after toggling
-            // full screen); the position check keeps clicks elsewhere out.
-            left_down: window.get_mouse_down(minifb::MouseButton::Left)
-                || (position.is_some() && window_control::left_button_down().unwrap_or(false)),
-            scroll: window.get_scroll_wheel().map_or(0.0, |(_, y)| y),
-        };
+        let pointer = pointer_state(&window);
         dock.update(pointer, WINDOW_WIDTH, WINDOW_HEIGHT);
         if let Some(options) = dock.take_cheat_options_change() {
             shared.set_cheat_options(options);
@@ -353,6 +211,181 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         return Err(message.into());
     }
     result
+}
+
+/// Opens the ROM with its cheats file and save, and reports them on the terminal.
+fn start_emulator(
+    rom_path: &str,
+    save_path: &Path,
+    settings: &Settings,
+) -> Result<Emulator, Box<dyn Error>> {
+    // The settings remember where the cheats hook in this ROM, so the
+    // signature scan only runs the first time (or after the ROM changes).
+    let mut emulator = Emulator::with_cheat_scan(rom_path, settings.cheat_scan.as_ref())?;
+    emulator.initialize_gba_startup(ROM_START)?;
+    let cheats_path = Cheats::path_for_rom(Path::new(rom_path));
+    match Cheats::load(&cheats_path) {
+        Ok(cheats) => {
+            if cheats.write_count() > 0 || cheats.master_line_count() > 0 {
+                let when = match cheats.hook_address() {
+                    Some(address) => format!("when the game reaches {address:#010X}"),
+                    None => "every frame".to_owned(),
+                };
+                eprintln!(
+                    "cheats {}: {} code write(s), applied {when} once the \"CHEATS FILE\" row of the cheat menu (Tab) is ticked",
+                    cheats_path.display(),
+                    cheats.write_count(),
+                );
+            }
+            for warning in cheats.warnings() {
+                eprintln!("cheats {}: {warning}", cheats_path.display());
+            }
+            emulator.set_cheats(cheats);
+        }
+        Err(error) => eprintln!("could not read cheats {}: {error}", cheats_path.display()),
+    }
+    if let Some(image) = game_library::read_save(save_path)? {
+        emulator.load_save(&image);
+        eprintln!("loaded save {}", save_path.display());
+    }
+    eprintln!(
+        "backup memory: {:?}, save file {}",
+        emulator.save_kind(),
+        save_path.display()
+    );
+    Ok(emulator)
+}
+
+/// Opens the window at the size it had last time (kept at the 3:2 ratio).
+fn open_window(settings: &Settings) -> Result<Window, Box<dyn Error>> {
+    let (initial_width, initial_height) =
+        settings
+            .window_size
+            .map_or((WINDOW_WIDTH, WINDOW_HEIGHT), |(width, _)| {
+                let width = width as usize;
+                (
+                    width,
+                    (width * WINDOW_HEIGHT + WINDOW_WIDTH / 2) / WINDOW_WIDTH,
+                )
+            });
+
+    let mut window = Window::new(
+        "GBA Emulator",
+        initial_width,
+        initial_height,
+        WindowOptions {
+            scale: Scale::X1,
+            // Resizable, with the picture scaled uniformly (bars, not
+            // stretching, when the window's shape differs).
+            resize: true,
+            scale_mode: ScaleMode::AspectRatioStretch,
+            ..WindowOptions::default()
+        },
+    )?;
+    // Native extras minifb lacks: keep the window frame itself at 3:2 while
+    // resizing, set a minimum size, and allow full screen.
+    window_control::lock_aspect_ratio(
+        &window,
+        WINDOW_WIDTH,
+        WINDOW_HEIGHT,
+        WINDOW_WIDTH / 2,
+        WINDOW_HEIGHT / 2,
+    );
+    window_control::enable_fullscreen(&window);
+    // The window runs at the display's pace; emulation runs on its own thread.
+    window.set_target_fps(60);
+    Ok(window)
+}
+
+/// The cheats file's `wild_species` line preselects the menu's species (when
+/// none was saved); the row's checkbox is what turns it on.
+fn preselect_file_wild_species(
+    options: &mut CheatOptions,
+    file_species: Option<u16>,
+    wild_hook: Option<u32>,
+) {
+    let Some(species) = file_species.filter(|_| options.wild_species.is_none()) else {
+        return;
+    };
+    options.wild_species = Some(species);
+    let name = gba_emulator::cheats::species::name(species).unwrap_or("?");
+    match wild_hook {
+        Some(address) => eprintln!(
+            "cheats: the cheats file sets the wild species to {name} ({species}); tick its checkbox in the cheat menu (Tab) to use it (found CreateWildMon at {address:#010X})"
+        ),
+        None => eprintln!(
+            "cheats: the cheats file sets the wild species to {name}, but this ROM is not a FireRed, LeafGreen or Emerald build whose wild-encounter function can be found"
+        ),
+    }
+}
+
+/// The mouse mapped back to the 960x640 buffer the dock is drawn in, using the
+/// window system's position (minifb's is wrong in full screen).
+fn pointer_state(window: &Window) -> Pointer {
+    let buffer_size = (WINDOW_WIDTH, WINDOW_HEIGHT);
+    let position = match window_control::pointer_in_picture_view(window) {
+        Some((pointer, view_size)) => {
+            window_control::pointer_in_buffer(Some(pointer), view_size, buffer_size)
+        }
+        None => {
+            let (width, height) = window.get_size();
+            window_control::pointer_in_buffer(
+                window.get_mouse_pos(MouseMode::Pass),
+                (width as f32, height as f32),
+                buffer_size,
+            )
+        }
+    };
+    Pointer {
+        position,
+        // The window system's button state also covers clicks the window never
+        // received because it was not key yet (just after toggling full
+        // screen); the position check keeps clicks elsewhere out.
+        left_down: window.get_mouse_down(minifb::MouseButton::Left)
+            || (position.is_some() && window_control::left_button_down().unwrap_or(false)),
+        scroll: window.get_scroll_wheel().map_or(0.0, |(_, y)| y),
+    }
+}
+
+/// Acts on the keys: the cheat menu, the save state, the cheat menu's own
+/// navigation while it is open, and the game's buttons.
+fn handle_keys(window: &Window, dock: &mut Dock, shared: &Shared, button_gate: &mut ButtonGate) {
+    if window.is_key_pressed(CHEAT_MENU_KEY, minifb::KeyRepeat::No) {
+        dock.toggle_menu();
+    }
+    if window.is_key_pressed(SAVE_STATE_KEY, minifb::KeyRepeat::No) {
+        shared.state_request.store(STATE_SAVE, Ordering::Relaxed);
+    }
+    if window.is_key_pressed(LOAD_STATE_KEY, minifb::KeyRepeat::No) {
+        shared.state_request.store(STATE_LOAD, Ordering::Relaxed);
+    }
+    // While the cheat menu is open the movement keys drive it, and the game
+    // sees no buttons.
+    if dock.menu_open() {
+        for (key, nav, repeats) in MENU_KEYS {
+            let repeat = if repeats {
+                minifb::KeyRepeat::Yes
+            } else {
+                minifb::KeyRepeat::No
+            };
+            if window.is_key_pressed(key, repeat) {
+                dock.menu_navigate(nav);
+            }
+        }
+    }
+    dock.menu_hold_toggle(
+        dock.menu_open()
+            && MENU_KEYS
+                .iter()
+                .any(|(key, nav, _)| *nav == MenuNav::Toggle && window.is_key_down(*key)),
+    );
+    shared.buttons.store(
+        button_gate.apply(
+            dock.menu_open(),
+            buttons_from_keys(|key| window.is_key_down(key)),
+        ),
+        Ordering::Relaxed,
+    );
 }
 
 /// Nearest-neighbour upscale of the 240x160 frame to the window buffer. Kept

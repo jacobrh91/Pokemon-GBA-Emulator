@@ -81,6 +81,14 @@ pub(super) struct Shared {
 }
 
 impl Shared {
+    /// Reports why emulation stopped and ends the loop.
+    fn fail(&self, message: String) {
+        if let Ok(mut slot) = self.error.lock() {
+            *slot = Some(message);
+        }
+        self.running.store(false, Ordering::Relaxed);
+    }
+
     /// Publishes new cheat-menu options for the emulation thread.
     pub(super) fn set_cheat_options(&self, options: CheatOptions) {
         if let Ok(mut slot) = self.cheat_options.lock() {
@@ -110,6 +118,101 @@ impl Shared {
     }
 }
 
+/// Keeps the emulation at the right speed between frames.
+struct Pacer {
+    /// When the next frame is due, for wall-clock pacing.
+    next_frame: Instant,
+    /// The last frame was paced by the clock at a fixed fast-forward speed.
+    was_throttled: bool,
+}
+
+impl Pacer {
+    fn new() -> Self {
+        Self {
+            next_frame: Instant::now(),
+            was_throttled: false,
+        }
+    }
+
+    /// Sleeps until `next_frame`, or runs flat out when already late.
+    fn sleep_until_due(&mut self) {
+        let now = Instant::now();
+        if self.next_frame > now {
+            thread::sleep(self.next_frame - now);
+        } else {
+            self.next_frame = now;
+        }
+    }
+
+    /// Fast-forward at `target` times real time; 0 is flat out.
+    fn fast_forward(&mut self, target: u32) {
+        if target == 0 {
+            self.next_frame = Instant::now();
+        } else {
+            // Each emulated frame owns 1/target of a console frame.
+            if !self.was_throttled {
+                self.next_frame = Instant::now();
+            }
+            self.next_frame += FRAME_DURATION / target;
+            self.sleep_until_due();
+        }
+        self.was_throttled = target != 0;
+    }
+
+    /// Real time: paced by the audio device, or by the clock without one.
+    fn normal(&mut self, sink: Option<&AudioSink>, shared: &Shared) {
+        self.was_throttled = false;
+        match sink {
+            // Sleep while the device still has plenty queued.
+            Some(sink) => {
+                let deadline = Instant::now() + MAX_AUDIO_WAIT;
+                while shared.running.load(Ordering::Relaxed)
+                    && sink.queued_frames() > TARGET_QUEUED_AUDIO_FRAMES
+                    && Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                self.next_frame = Instant::now();
+            }
+            None => {
+                self.next_frame += FRAME_DURATION;
+                self.sleep_until_due();
+            }
+        }
+    }
+}
+
+/// Measures the emulated speed as a multiple of the console's real-time rate
+/// over short windows, and publishes it.
+struct SpeedMeter {
+    window_start: Instant,
+    frames: u32,
+}
+
+impl SpeedMeter {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            frames: 0,
+        }
+    }
+
+    /// Starts a new window (after a jump in time, such as a restart).
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn frame_done(&mut self, shared: &Shared) {
+        self.frames += 1;
+        let window = self.window_start.elapsed();
+        if window >= SPEED_SAMPLE_INTERVAL {
+            let factor = speed_factor(self.frames, window);
+            shared.speed.store(factor.to_bits(), Ordering::Relaxed);
+            self.reset();
+        }
+    }
+}
+
 /// Runs the emulator, publishing frames and audio until told to stop.
 pub(super) fn emulation_loop(
     mut emulator: Emulator,
@@ -121,12 +224,10 @@ pub(super) fn emulation_loop(
     let mut state_operations = 0_u32;
     let mut applied_options_version = 0_u32;
     let mut jitter = JitterBag::new();
-    let mut next_frame = Instant::now();
+    let mut pacer = Pacer::new();
     let mut last_save_check = Instant::now();
     let mut last_publish = Instant::now();
-    let mut speed_window_start = Instant::now();
-    let mut speed_window_frames = 0_u32;
-    let mut was_throttled = false;
+    let mut speed = SpeedMeter::new();
     let mut instructions = 0_u64;
 
     while shared.running.load(Ordering::Relaxed) {
@@ -134,18 +235,14 @@ pub(super) fn emulation_loop(
         if shared.restart.swap(false, Ordering::Relaxed) {
             flush_save(&mut emulator, save_path);
             if let Err(error) = emulator.reset() {
-                if let Ok(mut slot) = shared.error.lock() {
-                    *slot = Some(format!("could not restart the game: {error}"));
-                }
-                shared.running.store(false, Ordering::Relaxed);
+                shared.fail(format!("could not restart the game: {error}"));
                 return;
             }
             if let Some(sink) = &sink {
                 sink.clear();
             }
             shared.restarts.fetch_add(1, Ordering::Relaxed);
-            speed_window_start = Instant::now();
-            speed_window_frames = 0;
+            speed.reset();
         }
 
         // Save states are taken and restored between frames.
@@ -166,20 +263,16 @@ pub(super) fn emulation_loop(
                     // numbers, so run a few extra frames before handing back.
                     let extra = jitter.next(shared.load_jitter_frames.load(Ordering::Relaxed));
                     if let Err(error) = advance_frames(&mut emulator, extra) {
-                        if let Ok(mut slot) = shared.error.lock() {
-                            *slot = Some(format!(
-                                "emulation stopped after loading a save state: {error}"
-                            ));
-                        }
-                        shared.running.store(false, Ordering::Relaxed);
+                        shared.fail(format!(
+                            "emulation stopped after loading a save state: {error}"
+                        ));
                         flush_save(&mut emulator, save_path);
                         return;
                     }
                     if let Some(sink) = &sink {
                         sink.clear();
                     }
-                    speed_window_start = Instant::now();
-                    speed_window_frames = 0;
+                    speed.reset();
                     state_operations += 1;
                     shared
                         .state_notice
@@ -202,12 +295,9 @@ pub(super) fn emulation_loop(
         while !emulator.take_frame_ready() {
             let pc = emulator.cpu().registers[15];
             if let Err(error) = emulator.step() {
-                if let Ok(mut slot) = shared.error.lock() {
-                    *slot = Some(format!(
-                        "emulation stopped at PC {pc:#010X} after {instructions} instructions: {error}"
-                    ));
-                }
-                shared.running.store(false, Ordering::Relaxed);
+                shared.fail(format!(
+                    "emulation stopped at PC {pc:#010X} after {instructions} instructions: {error}"
+                ));
                 flush_save(&mut emulator, save_path);
                 return;
             }
@@ -233,15 +323,7 @@ pub(super) fn emulation_loop(
 
         shared.frames.fetch_add(1, Ordering::Relaxed);
 
-        // Emulated speed as a multiple of the console's real-time rate.
-        speed_window_frames += 1;
-        let window = speed_window_start.elapsed();
-        if window >= SPEED_SAMPLE_INTERVAL {
-            let factor = speed_factor(speed_window_frames, window);
-            shared.speed.store(factor.to_bits(), Ordering::Relaxed);
-            speed_window_start = Instant::now();
-            speed_window_frames = 0;
-        }
+        speed.frame_done(shared);
 
         // Persist backup memory shortly after a game writes it.
         if last_save_check.elapsed() >= SAVE_CHECK_INTERVAL {
@@ -257,50 +339,9 @@ pub(super) fn emulation_loop(
             } else {
                 0
             };
-            if target == 0 {
-                // MAX: no pacing.
-                next_frame = Instant::now();
-            } else {
-                // Each emulated frame owns 1/target of a console frame.
-                if !was_throttled {
-                    next_frame = Instant::now();
-                }
-                next_frame += FRAME_DURATION / target;
-                let now = Instant::now();
-                if next_frame > now {
-                    thread::sleep(next_frame - now);
-                } else {
-                    // Cannot keep up: run flat out.
-                    next_frame = now;
-                }
-            }
-            was_throttled = target != 0;
-            continue;
-        }
-        was_throttled = false;
-
-        match &sink {
-            // Audio-paced: sleep while the device still has plenty queued.
-            Some(sink) => {
-                let deadline = Instant::now() + MAX_AUDIO_WAIT;
-                while shared.running.load(Ordering::Relaxed)
-                    && sink.queued_frames() > TARGET_QUEUED_AUDIO_FRAMES
-                    && Instant::now() < deadline
-                {
-                    thread::sleep(Duration::from_millis(1));
-                }
-                next_frame = Instant::now();
-            }
-            // No audio device: fall back to wall-clock pacing.
-            None => {
-                next_frame += FRAME_DURATION;
-                let now = Instant::now();
-                if next_frame > now {
-                    thread::sleep(next_frame - now);
-                } else {
-                    next_frame = now;
-                }
-            }
+            pacer.fast_forward(target);
+        } else {
+            pacer.normal(sink.as_ref(), shared);
         }
     }
     // Shutting down: make sure the last writes reach the disk.

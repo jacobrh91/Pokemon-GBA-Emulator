@@ -2,7 +2,7 @@
 //!
 //! **Mechanism: replace a value in the middle of a routine.** The emulator
 //! stops at one instruction inside the ball-throw battle script and sets the
-//! register holding the catch odds (`r6 = 0xFF`) (see `Emulator::step`).
+//! register holding the catch odds (`r6 = 0xFF`).
 //!
 //! # The catch check
 //!
@@ -25,13 +25,6 @@
 //!
 //! Every ball goes through this test (the Safari Zone's ball, the Master
 //! Ball); trainers' Pokémon and the scripted tutorial catch never reach it.
-//!
-//! # How the place was found
-//!
-//! By recording the addresses executed during a real ball throw and keeping
-//! the `cmp rN, #0xFE` instructions; exactly one sat in front of a shake-roll
-//! branch. A new build is checked by throwing a ball at a high-level Pokémon
-//! with the cheat off and on.
 
 use super::Signature;
 
@@ -40,19 +33,8 @@ use super::Signature;
 /// but is not what identifies the code. The hook is the `cmp r6, #0xFE`, 8
 /// bytes in.
 pub(crate) const SIGNATURE: Signature = Signature::new(
-    &[
-        Some(0xFE),
-        Some(0x28),
-        Some(0x01),
-        Some(0xD8),
-        Some(0x01),
-        Some(0x30),
-        Some(0x08),
-        Some(0x70),
-        Some(0xFE),
-        Some(0x2E),
-        None,
-        Some(0xD9),
+    &pattern![
+        0xFE, 0x28, 0x01, 0xD8, 0x01, 0x30, 0x08, 0x70, 0xFE, 0x2E, _, 0xD9,
     ],
     8,
 );

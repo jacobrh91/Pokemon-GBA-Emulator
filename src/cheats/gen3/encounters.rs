@@ -4,9 +4,9 @@
 //! **Mechanism: replace a value at the end of a routine.** Every step on an
 //! encounter tile asks one small function whether an encounter happens: it
 //! compares a random number with the (already scaled) encounter rate and
-//! returns 1 for yes. The emulator stops where the answer is final and sets
-//! it to 0 (see `Emulator::step`). Steps are still counted and fishing and
-//! scripted encounters, which do not ask, still work.
+//! returns 1 for yes. The emulator stops where the answer is final and sets it
+//! to 0. Steps are still counted, and fishing and scripted encounters, which do
+//! not ask, still work.
 //!
 //! # The function
 //!
@@ -32,61 +32,18 @@
 //!
 //! The two calls are wildcards; the hook is the `pop {r4}` 38 bytes in.
 //!
-//! The divisor is the one thing that differs between games: FireRed and
-//! LeafGreen use 1600 (`movs r1, #0xC8 ; lsls r1, r1, #3`) and Emerald 2880
-//! (`movs r1, #0xB4 ; lsls r1, r1, #4`). The four bytes of that constant are
-//! wildcards (with the `21` of `movs r1, #imm` kept), and the rest still
-//! matches exactly once in each game.
+//! Only the divisor differs between games: FireRed and LeafGreen use 1600
+//! (`movs r1, #0xC8 ; lsls r1, r1, #3`) and Emerald 2880 (`movs r1, #0xB4 ;
+//! lsls r1, r1, #4`), so those constant bytes are wildcards.
 
 use super::Signature;
 
 /// The bytes of the function; `None` is the wildcard of a `BL`.
 pub(crate) const SIGNATURE: Signature = Signature::new(
-    &[
-        Some(0x10),
-        Some(0xB5),
-        Some(0x04),
-        Some(0x1C),
-        Some(0x24),
-        Some(0x04),
-        Some(0x24),
-        Some(0x0C),
-        None,
-        None,
-        None,
-        None,
-        Some(0x00),
-        Some(0x04),
-        Some(0x00),
-        Some(0x0C),
-        None,
-        Some(0x21),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(0x00),
-        Some(0x04),
-        Some(0x00),
-        Some(0x0C),
-        Some(0xA0),
-        Some(0x42),
-        Some(0x01),
-        Some(0xD3),
-        Some(0x00),
-        Some(0x20),
-        Some(0x00),
-        Some(0xE0),
-        Some(0x01),
-        Some(0x20),
-        Some(0x10),
-        Some(0xBC),
-        Some(0x02),
-        Some(0xBC),
-        Some(0x08),
-        Some(0x47),
+    &pattern![
+        0x10, 0xB5, 0x04, 0x1C, 0x24, 0x04, 0x24, 0x0C, _, _, _, _, 0x00, 0x04, 0x00, 0x0C, _,
+        0x21, _, _, _, _, _, _, 0x00, 0x04, 0x00, 0x0C, 0xA0, 0x42, 0x01, 0xD3, 0x00, 0x20, 0x00,
+        0xE0, 0x01, 0x20, 0x10, 0xBC, 0x02, 0xBC, 0x08, 0x47,
     ],
     38,
 );

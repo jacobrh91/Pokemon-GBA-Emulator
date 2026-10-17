@@ -1,24 +1,17 @@
 //! The shiny cheat: Pokémon the game creates are made shiny, at a chosen odds.
 //!
-//! **Mechanism: change values in the middle of a routine.** The emulator
-//! stops at one instruction inside `CreateBoxMon`, where the personality
-//! value (PID) and the OT ID are both known, and rewrites the PID (see
-//! `Emulator::step`).
-//!
-//! # What makes a Pokémon shiny
+//! **Mechanism: change a value in the middle of a routine.** The emulator stops
+//! at one instruction inside `CreateBoxMon`, where the personality value (PID)
+//! and OT ID are both known, and rewrites the PID.
 //!
 //! In generation III a Pokémon is shiny when
-//!
-//! ```text
-//! (OT_ID_high ^ OT_ID_low ^ PID_high ^ PID_low) < 8
-//! ```
-//!
-//! Shininess is not stored, so a Pokémon is made shiny by choosing its PID.
+//! `OT_ID_high ^ OT_ID_low ^ PID_high ^ PID_low < 8`. Shininess is not stored,
+//! so a Pokémon is made shiny by choosing its PID.
 //!
 //! # Where
 //!
-//! Every Pokémon goes through `CreateBoxMon`, which draws a PID, picks the OT
-//! ID and stores both. The OT ID branches join at one instruction, the hook:
+//! Every Pokémon goes through `CreateBoxMon`, which draws a PID, picks the OT ID
+//! and stores both. The OT ID branches join at one instruction, the hook:
 //!
 //! ```text
 //! 10 7B   ldrb r0, [r2, #0xC]   ┐
@@ -33,26 +26,25 @@
 //! 4A 46   mov  r2, sb
 //! ```
 //!
-//! The 20 bytes contain no `BL` or PC-relative load, so they are the same in
-//! every build examined (see [`super`] for the scan).
+//! These 20 bytes have no `BL` or PC-relative load, so they are the same in
+//! every build examined.
 //!
 //! # What is changed
 //!
-//! The PID is rewritten in the local and in the BoxPokemon. The new PID keeps
-//! the low byte (gender, ability slot) and the nature (`PID % 25`), so only
-//! the colours change (see [`shiny_personality`]). Already-shiny Pokémon are
-//! left alone, and so is Unown, whose letter is made of the PID's low bits.
-//! The OT ID is not touched, so the player's Pokémon stay the player's.
+//! The PID is rewritten in the local and in the BoxPokemon, keeping the low byte
+//! (gender, ability slot) and the nature (`PID % 25`), so only the colours change
+//! (see [`shiny_personality`]). Already-shiny Pokémon and Unown (whose letter is
+//! made of the PID's low bits) are left alone, and the OT ID is not touched.
 
-use super::{Signature, exact};
+use super::Signature;
 
 /// The bytes around the join of the OT-ID branches. The hook is the `adds r0,
 /// r7, #0` 14 bytes in.
 pub(crate) const SIGNATURE: Signature = Signature::new(
-    &exact([
+    &pattern![
         0x10, 0x7B, 0x00, 0x04, 0x01, 0x43, 0x50, 0x7B, 0x00, 0x06, 0x01, 0x43, 0x06, 0x91, 0x38,
         0x1C, 0x01, 0x21, 0x4A, 0x46,
-    ]),
+    ],
     14,
 );
 

@@ -1,26 +1,23 @@
 //! The first Pokémon of the party acts as if it knew every HM (Cut, Fly, Surf,
-//! Strength, Flash, Rock Smash, Waterfall and Dive), without actually knowing
-//! them. This cheat is **always on**, with no row to switch.
+//! Strength, Flash, Rock Smash, Waterfall and Dive), without knowing them.
+//! **Always on**, with no row to switch.
 //!
 //! **Mechanism: replace a value at the end of a routine.** Whenever the game
-//! asks whether a Pokémon knows a move (the tree in front of the player, a
-//! boulder, a rock to smash, the water at the edge of a shore, ...), it calls
-//! one small function, `MonKnowsMove(mon, move)`, which looks through the four
-//! move slots. The emulator stops at its return and, when the question is
-//! about the first party slot and the move is an HM, makes the answer yes (see
-//! `Emulator::step`). The scripts then go on exactly as if that Pokémon had
-//! the move, including the "X used CUT!" that names it. The Pokémon's real
-//! moves are never touched.
+//! asks whether a Pokémon knows a move (a tree, a boulder, water at a shore, ...)
+//! it calls `MonKnowsMove(mon, move)`, which looks through the four move slots.
+//! The emulator stops at its return and, when the question is about the first
+//! party slot and the move is an HM, makes the answer yes. The scripts go on as
+//! if that Pokémon had the move, including the "X used CUT!" that names it; its
+//! real moves are never touched.
 //!
-//! This is what the game's own checks see. The START menu's party list builds
-//! its own list of the Pokémon's field moves by reading its moves directly;
+//! The START menu's party list reads the moves directly instead;
 //! [`super::party_menu`] adds the HMs to that list for the first Pokémon.
 //!
 //! # Finding it
 //!
-//! `MonKnowsMove(mon, move)` is a leaf loop over `GetMonData(mon,
-//! MON_DATA_MOVE1 + i)`; the hook is its `pop {r4, r5, r6}`, where `r6` is the
-//! Pokémon, `r5` the move and `r0` the answer:
+//! `MonKnowsMove` is a leaf loop over `GetMonData(mon, MON_DATA_MOVE1 + i)`; the
+//! hook is its `pop {r4, r5, r6}`, where `r6` is the Pokémon, `r5` the move and
+//! `r0` the answer:
 //!
 //! ```text
 //! 70 B5        push {r4, r5, r6, lr}
@@ -41,11 +38,10 @@
 //! 02 BC  08 47 pop  {r1} ; bx r1
 //! ```
 //!
-//! "The first slot" needs the address of the party array. Rather than keep a
-//! table of RAM addresses (they differ between the English, Japanese and
-//! Emerald builds), it is read from the game: the script command that checks
-//! the party, `checkpartymove`, computes `&gPlayerParty[i]` from a constant it
-//! loads from the ROM's literal pool, and that load is found by its
+//! "The first slot" needs the address of the party array, which differs between
+//! the English, Japanese and Emerald builds. It is read from the game instead:
+//! the script command `checkpartymove` computes `&gPlayerParty[i]` from a
+//! constant loaded from the ROM's literal pool, and that load is found by its
 //! surrounding bytes (`PARTY_LOAD`) and decoded.
 
 use super::{ROM_BASE, Signature};
@@ -53,53 +49,10 @@ use super::{ROM_BASE, Signature};
 /// `MonKnowsMove`; the hook is its `pop {r4, r5, r6}`. `None` is a wildcard
 /// (the call, and the branch distances).
 pub(crate) const MON_KNOWS_MOVE: Signature = Signature::new(
-    &[
-        Some(0x70),
-        Some(0xB5),
-        Some(0x06),
-        Some(0x1C),
-        Some(0x09),
-        Some(0x04),
-        Some(0x0D),
-        Some(0x0C),
-        Some(0x00),
-        Some(0x24),
-        Some(0x21),
-        Some(0x1C),
-        Some(0x0D),
-        Some(0x31),
-        Some(0x30),
-        Some(0x1C),
-        None,
-        None,
-        None,
-        None,
-        Some(0xA8),
-        Some(0x42),
-        None,
-        Some(0xD1),
-        Some(0x01),
-        Some(0x20),
-        None,
-        Some(0xE0),
-        Some(0x60),
-        Some(0x1C),
-        Some(0x00),
-        Some(0x06),
-        Some(0x04),
-        Some(0x0E),
-        Some(0x03),
-        Some(0x2C),
-        None,
-        Some(0xD9),
-        Some(0x00),
-        Some(0x20),
-        Some(0x70),
-        Some(0xBC),
-        Some(0x02),
-        Some(0xBC),
-        Some(0x08),
-        Some(0x47),
+    &pattern![
+        0x70, 0xB5, 0x06, 0x1C, 0x09, 0x04, 0x0D, 0x0C, 0x00, 0x24, 0x21, 0x1C, 0x0D, 0x31, 0x30,
+        0x1C, _, _, _, _, 0xA8, 0x42, _, 0xD1, 0x01, 0x20, _, 0xE0, 0x60, 0x1C, 0x00, 0x06, 0x04,
+        0x0E, 0x03, 0x2C, _, 0xD9, 0x00, 0x20, 0x70, 0xBC, 0x02, 0xBC, 0x08, 0x47,
     ],
     40,
 );
@@ -109,43 +62,10 @@ pub(crate) const MON_KNOWS_MOVE: Signature = Signature::new(
 /// ldr r0, [pc, #..] ; adds r4, r1, r0` and the call that reads the species.
 /// The hook is the PC-relative `ldr`, whose pool entry is the array's address.
 pub(crate) const PARTY_LOAD: Signature = Signature::new(
-    &[
-        Some(0x64),
-        Some(0x20),
-        Some(0x31),
-        Some(0x1C),
-        Some(0x41),
-        Some(0x43),
-        None,
-        Some(0x48),
-        Some(0x0C),
-        Some(0x18),
-        Some(0x20),
-        Some(0x1C),
-        Some(0x0B),
-        Some(0x21),
-        Some(0x00),
-        Some(0x22),
-        None,
-        None,
-        None,
-        None,
-        Some(0x00),
-        Some(0x04),
-        Some(0x05),
-        Some(0x0C),
-        Some(0x00),
-        Some(0x2D),
-        None,
-        Some(0xD1),
-        Some(0x00),
-        Some(0x20),
-        Some(0xF0),
-        Some(0xBC),
-        Some(0x02),
-        Some(0xBC),
-        Some(0x08),
-        Some(0x47),
+    &pattern![
+        0x64, 0x20, 0x31, 0x1C, 0x41, 0x43, _, 0x48, 0x0C, 0x18, 0x20, 0x1C, 0x0B, 0x21, 0x00,
+        0x22, _, _, _, _, 0x00, 0x04, 0x05, 0x0C, 0x00, 0x2D, _, 0xD1, 0x00, 0x20, 0xF0, 0xBC,
+        0x02, 0xBC, 0x08, 0x47,
     ],
     6,
 );

@@ -93,7 +93,7 @@ impl PerfectTarget {
 /// so a row can be turned off without losing its choices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CheatOptions {
-    /// Pokémon are made shiny (FireRed / LeafGreen / Emerald), at the chance `shiny_odds`.
+    /// Pokémon are made shiny, at the chance `shiny_odds`.
     pub shiny: bool,
     /// How often. Remembered while the row is off.
     pub shiny_odds: ShinyOdds,
@@ -105,19 +105,17 @@ pub struct CheatOptions {
     pub wild_level: Option<u8>,
     /// Switch of the perfect-stats row; the target is kept while off.
     pub perfect_enabled: bool,
-    /// Whose Pokémon get maximum IVs (FireRed / LeafGreen / Emerald).
+    /// Whose Pokémon get maximum IVs.
     pub perfect_target: PerfectTarget,
-    /// The player never runs out of money (FireRed / LeafGreen / Emerald).
+    /// The player never runs out of money.
     pub infinite_money: bool,
-    /// Walking never starts a wild encounter (FireRed / LeafGreen / Emerald).
+    /// Walking never starts a wild encounter.
     pub no_encounters: bool,
-    /// Every thrown ball catches (FireRed / LeafGreen / Emerald).
+    /// Every thrown ball catches.
     pub catch_always: bool,
-    /// All experience gained is boosted: every Pokémon is treated as a traded
-    /// one (FireRed / LeafGreen / Emerald).
+    /// Every Pokémon is treated as a traded one, for the boosted experience.
     pub exp_boost: bool,
-    /// The emulator runs flat out while a battle is on (Emerald; FireRed and
-    /// LeafGreen in English).
+    /// The emulator runs flat out while a battle is on.
     pub fast_battles: bool,
     /// The `.cheats` file's codes are applied. Never saved: they can crash
     /// the game if on before it has loaded what they patch.

@@ -2,14 +2,12 @@
 //! loses no HP while walking, and never faints from it.
 //!
 //! **Mechanism: replace a value in the middle of a routine.** Every few steps
-//! the game calls `DoPoisonFieldEffect`, which goes through the party and, for
-//! each Pokémon whose status is poison, takes one HP (counting it as fainted
-//! when that leaves 0), then flashes the screen and, if one fainted, ends in a
-//! white-out. The status is tested with `GetAilmentFromStatus(status) ==
-//! AILMENT_PSN`; the emulator stops at that comparison and makes the ailment
-//! "none" (see `Emulator::step`), so the Pokémon is skipped. Nothing else
-//! changes: the poison is still there in the party menu and in battle (battle
-//! damage is a different routine), and the step counter still counts.
+//! the game calls `DoPoisonFieldEffect`, which takes one HP from each poisoned
+//! Pokémon, flashes the screen and, if one fainted, ends in a white-out. The
+//! status is tested with `GetAilmentFromStatus(status) == AILMENT_PSN`; the
+//! emulator stops at that comparison and makes the ailment "none", so the
+//! Pokémon is skipped. The poison itself stays, in the party menu and in battle
+//! (a different routine).
 //!
 //! # The signature
 //!
@@ -31,9 +29,7 @@
 //! ?? D1        bne  next
 //! ```
 //!
-//! The 38 bytes are the same in FireRed, LeafGreen and Emerald (the games
-//! share this code). As for the other scans, a ROM is used only if the pattern
-//! matches exactly once (see [`super`]).
+//! The 38 bytes are the same in FireRed, LeafGreen and Emerald.
 
 use super::Signature;
 
@@ -42,45 +38,10 @@ pub(crate) const NO_AILMENT: u32 = 0;
 
 /// The loop of `DoPoisonFieldEffect`; the hook is the `cmp r0, #1`.
 pub(crate) const SIGNATURE: Signature = Signature::new(
-    &[
-        Some(0x00),
-        Some(0x27),
-        Some(0x00),
-        Some(0x26),
-        Some(0x05),
-        Some(0x25),
-        Some(0x20),
-        Some(0x1C),
-        Some(0x05),
-        Some(0x21),
-        None,
-        None,
-        None,
-        None,
-        Some(0x00),
-        Some(0x28),
-        None,
-        Some(0xD0),
-        Some(0x20),
-        Some(0x1C),
-        Some(0x37),
-        Some(0x21),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(0x00),
-        Some(0x06),
-        Some(0x00),
-        Some(0x0E),
-        Some(0x01),
-        Some(0x28),
-        None,
-        Some(0xD1),
+    &pattern![
+        0x00, 0x27, 0x00, 0x26, 0x05, 0x25, 0x20, 0x1C, 0x05, 0x21, _, _, _, _, 0x00, 0x28, _,
+        0xD0, 0x20, 0x1C, 0x37, 0x21, _, _, _, _, _, _, _, _, 0x00, 0x06, 0x00, 0x0E, 0x01, 0x28,
+        _, 0xD1,
     ],
     34,
 );

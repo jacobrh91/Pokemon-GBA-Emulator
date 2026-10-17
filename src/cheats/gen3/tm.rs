@@ -1,5 +1,5 @@
-//! Infinitely usable TMs: teaching a move from a TM never uses it up. This
-//! cheat is **always on**, with no row to switch.
+//! Infinitely usable TMs: teaching a move from a TM never uses it up. **Always
+//! on**, with no row to switch.
 //!
 //! **Mechanism: replace a function's argument just before the call.** Once a
 //! Pokémon has learned the move, the game removes the item from the bag unless
@@ -17,50 +17,28 @@
 //! 41 46  08 68                     mov r1, r8 ; ldr r0, [r1]
 //! ```
 //!
-//! At the `bl` the emulator sets `r1` to 0, so the game asks to remove none
-//! and the TM keeps its count.
+//! At the `bl` the emulator sets `r1` to 0, so the game removes none.
 //!
 //! # The places
 //!
-//! The same code is compiled in more than one way, and a game has one or more
-//! such places:
+//! The same code is compiled two ways, and a game has one or more of each:
 //!
 //! * **Variant A** (above): `cmp r1, r0` / `adds r0, r1, #0`, followed by `mov
-//!   r1, r8`. FireRed and LeafGreen have two of these, one for each way the
-//!   lesson finishes.
+//!   r1, r8`. FireRed and LeafGreen have two, one for each way the lesson ends.
 //! * **Variant B**: the item is in `r4`: `cmp r4, r0` / `adds r0, r4, #0`,
 //!   followed by a PC-relative `ldr r1, [pc, #..]`. FireRed and LeafGreen have
-//!   one more of these (a third way the lesson finishes, found by scanning
-//!   Emerald, which has only this one), and so does Emerald.
+//!   one (a third way the lesson ends), and Emerald has this one only.
 //!
-//! Every one found is hooked, one to three in all. Selling or tossing a TM
-//! goes through other code and is not affected.
+//! Every one found is hooked, one to three in all. Selling or tossing a TM goes
+//! through other code and is not affected.
 
 use super::Signature;
 
 /// Variant A: the item is in `r1`. `None` is the wildcard of the `BL`.
 pub(crate) const SIGNATURE: Signature = Signature::new(
-    &[
-        Some(0xA9),
-        Some(0x20),
-        Some(0x40),
-        Some(0x00),
-        Some(0x81),
-        Some(0x42),
-        Some(0x03),
-        Some(0xD8),
-        Some(0x08),
-        Some(0x1C),
-        Some(0x01),
-        Some(0x21),
-        None,
-        None,
-        None,
-        None,
-        Some(0x41),
-        Some(0x46),
-        Some(0x08),
-        Some(0x68),
+    &pattern![
+        0xA9, 0x20, 0x40, 0x00, 0x81, 0x42, 0x03, 0xD8, 0x08, 0x1C, 0x01, 0x21, _, _, _, _, 0x41,
+        0x46, 0x08, 0x68,
     ],
     12,
 );
@@ -68,25 +46,9 @@ pub(crate) const SIGNATURE: Signature = Signature::new(
 /// Variant B: the item is in `r4`; the instruction after the call is a
 /// PC-relative load (its offset is a wildcard).
 pub(crate) const VARIANT_B: Signature = Signature::new(
-    &[
-        Some(0xA9),
-        Some(0x20),
-        Some(0x40),
-        Some(0x00),
-        Some(0x84),
-        Some(0x42),
-        Some(0x03),
-        Some(0xD8),
-        Some(0x20),
-        Some(0x1C),
-        Some(0x01),
-        Some(0x21),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(0x49),
+    &pattern![
+        0xA9, 0x20, 0x40, 0x00, 0x84, 0x42, 0x03, 0xD8, 0x20, 0x1C, 0x01, 0x21, _, _, _, _, _,
+        0x49,
     ],
     12,
 );
