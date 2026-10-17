@@ -17,21 +17,11 @@ To keep games in a library and start them by name:
 ```text
 cargo run --release -- install path/to/game.gba    # copy a ROM into the library
 cargo run --release -- list                        # show installed ROMs
-cargo run --release -- "Pokemon Emerald"           # run one by (a prefix of) its name
+cargo run --release -- "path/to/Pokemon Emerald.gba"
 ```
 
 Saves, settings and save states are kept beside each game. Moving the mouse over
 the window slides up a dock with volume, full screen and fast-forward.
-
-| Key | Action |
-|---|---|
-| W A S D / Space / C | D-pad / A / B |
-| Q E / X / V | L R / Start / Select |
-| Shift (hold) | Fast-forward |
-| 0 / 1 | Save / load a state |
-| Tab | Cheat menu |
-| F11 | Full screen |
-| Escape | Quit |
 
 ## Cheats
 

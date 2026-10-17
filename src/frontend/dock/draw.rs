@@ -1,6 +1,7 @@
 //! Painting the dock over the game frame.
 
 use super::cheat_menu::MenuLayout;
+use super::controls_menu::ControlsLayout;
 use super::layout::{DOCK_HEIGHT, DOCK_MARGIN, KNOB_RADIUS, Layout, TRACK_HEIGHT};
 use super::{Dock, SpeedSetting};
 use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
@@ -124,6 +125,27 @@ impl Dock {
             layout.cheats.y + (layout.cheats.height - GLYPH_HEIGHT * TEXT_SCALE) / 2,
             if menu_open { DOCK_COLOR } else { ICON_COLOR },
         );
+        let controls_open = self.controls.is_open();
+        canvas.rounded_rect(
+            layout.settings,
+            9,
+            if controls_open {
+                FILL_COLOR
+            } else {
+                TRACK_COLOR
+            },
+            if controls_open { 1.0 } else { 0.55 },
+        );
+        canvas.gear(
+            layout.settings.x + layout.settings.width / 2,
+            layout.settings.y + layout.settings.height / 2,
+            11,
+            if controls_open {
+                DOCK_COLOR
+            } else {
+                ICON_COLOR
+            },
+        );
         canvas.rect(
             layout.cheats_divider_x,
             layout.dock.y + 14,
@@ -176,7 +198,12 @@ impl Dock {
             ICON_COLOR,
         );
 
-        // The cheat menu opens above the dock and does not slide with it.
+        // The menus open above the dock and do not slide with it.
+        if self.controls.is_open() {
+            let mut menu_canvas = Canvas::new(buffer, width, height, 0);
+            self.controls
+                .draw(&mut menu_canvas, &ControlsLayout::new(width, layout.dock));
+        }
         if self.menu.is_open() {
             let mut menu_canvas = Canvas::new(buffer, width, height, 0);
             self.menu.draw(

@@ -39,6 +39,9 @@ pub struct Settings {
     /// Upper bound of the random number of extra frames run after loading a
     /// save state; 0 replays states exactly.
     pub state_jitter_frames: u32,
+    /// The keys changed in the controls menu, as `(control, key)` names such
+    /// as `("a", "z")`; a control not listed has its default key.
+    pub key_bindings: Vec<(String, String)>,
     /// The cheat menu's options, restored the next time the game is played.
     pub cheat_options: CheatOptions,
     /// Where the built-in cheats hook in this game's ROM, found by the first
@@ -55,11 +58,15 @@ impl Default for Settings {
             window_size: None,
             fast_forward: None,
             state_jitter_frames: DEFAULT_STATE_JITTER_FRAMES,
+            key_bindings: Vec::new(),
             cheat_options: CheatOptions::default(),
             cheat_scan: None,
         }
     }
 }
+
+/// The start of the key of a changed control: `key_up = w`.
+const KEY_PREFIX: &str = "key_";
 
 /// The cheat switches saved as plain `key = true` lines.
 type Switch = fn(&mut CheatOptions) -> &mut bool;
@@ -177,6 +184,13 @@ impl Settings {
                     }
                 }
                 key if key.starts_with(scan::PREFIX) => scan_pairs.push((key, value)),
+                key if key.starts_with(KEY_PREFIX) => {
+                    let control = key[KEY_PREFIX.len()..].to_owned();
+                    settings.key_bindings.retain(|(name, _)| *name != control);
+                    settings
+                        .key_bindings
+                        .push((control, value.to_ascii_lowercase()));
+                }
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -274,6 +288,9 @@ impl Settings {
             "state_jitter_frames = {}\n",
             self.state_jitter_frames
         ));
+        for (control, key) in &self.key_bindings {
+            text.push_str(&format!("{KEY_PREFIX}{control} = {key}\n"));
+        }
         text.push_str(&self.cheat_options_text());
         if let Some(scan) = &self.cheat_scan {
             text.push_str(&scan.to_text());
@@ -293,6 +310,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn changed_keys_are_saved_and_read_back_and_the_last_entry_of_a_control_wins() {
+        let settings = Settings::parse("key_a = Z\nkey_start = enter\nkey_a = x\n");
+        assert_eq!(
+            settings.key_bindings,
+            [
+                ("start".to_owned(), "enter".to_owned()),
+                ("a".to_owned(), "x".to_owned())
+            ]
+        );
+        assert_eq!(Settings::parse(&settings.to_text()), settings);
+        assert!(Settings::default().key_bindings.is_empty());
+        assert!(!Settings::default().to_text().contains("key_"));
+    }
+
+    #[test]
     fn settings_round_trip_through_text() {
         let settings = Settings {
             volume: 0.35,
@@ -301,6 +333,7 @@ mod tests {
             window_size: Some((1200, 800)),
             fast_forward: Some(4),
             state_jitter_frames: 12,
+            key_bindings: vec![("a".into(), "z".into()), ("start".into(), "enter".into())],
             cheat_options: CheatOptions {
                 shiny: true,
                 shiny_odds: ShinyOdds::from_one_in(100).unwrap(),

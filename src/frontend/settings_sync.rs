@@ -43,6 +43,11 @@ impl SettingsSync {
         self.current.cheat_scan = Some(scan);
     }
 
+    /// Records the key bindings changed in the controls menu.
+    pub(super) fn record_key_bindings(&mut self, bindings: Vec<(String, String)>) {
+        self.current.key_bindings = bindings;
+    }
+
     #[cfg(test)]
     pub(super) fn settings(&self) -> &Settings {
         &self.current

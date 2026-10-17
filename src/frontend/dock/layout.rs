@@ -4,7 +4,8 @@ use crate::frontend::draw::{GLYPH_ADVANCE, GLYPH_HEIGHT, Rect, TEXT_SCALE};
 
 /// The CHEATS button's text ("CHEATS" is six glyphs) plus padding.
 pub(super) const CHEATS_BUTTON_WIDTH: i32 = 6 * GLYPH_ADVANCE - TEXT_SCALE + 28;
-pub(super) const DOCK_WIDTH: i32 = 663 + CHEATS_BUTTON_WIDTH + 29;
+pub(super) const SETTINGS_SIZE: i32 = 38;
+pub(super) const DOCK_WIDTH: i32 = 663 + CHEATS_BUTTON_WIDTH + 29 + SETTINGS_SIZE + 10;
 pub(super) const RESTART_SIZE: i32 = 38;
 pub(super) const FULLSCREEN_SIZE: i32 = 38;
 pub(super) const POWER_SIZE: i32 = 38;
@@ -30,8 +31,10 @@ pub(super) struct Layout {
     /// Separator between the volume and speed sections.
     pub(super) divider_x: i32,
     pub(super) speed_buttons: [Rect; 4],
-    /// The button that opens the cheat menu, at the right end.
+    /// The button that opens the cheat menu, left of the cog.
     pub(super) cheats: Rect,
+    /// The cog that opens the controls menu, at the right end.
+    pub(super) settings: Rect,
     /// Separator between the speed buttons and the cheat button.
     pub(super) cheats_divider_x: i32,
     /// Separator after the power and restart buttons.
@@ -51,9 +54,15 @@ impl Layout {
         };
         let center_y = dock.y + DOCK_HEIGHT / 2;
         // Left to right: power, restart, full screen, divider, volume,
-        // divider, speed, divider, then cheats.
+        // divider, speed, divider, cheats, then the cog.
+        let settings = Rect {
+            x: dock.x + DOCK_WIDTH - DOCK_PADDING - SETTINGS_SIZE,
+            y: center_y - SETTINGS_SIZE / 2,
+            width: SETTINGS_SIZE,
+            height: SETTINGS_SIZE,
+        };
         let cheats = Rect {
-            x: dock.x + DOCK_WIDTH - DOCK_PADDING - CHEATS_BUTTON_WIDTH,
+            x: settings.x - 10 - CHEATS_BUTTON_WIDTH,
             y: center_y - SPEED_BUTTON_HEIGHT / 2,
             width: CHEATS_BUTTON_WIDTH,
             height: SPEED_BUTTON_HEIGHT,
@@ -107,6 +116,7 @@ impl Layout {
             divider_x: buttons_x - 14,
             speed_buttons,
             cheats,
+            settings,
             cheats_divider_x,
             restart_divider_x,
             restart,

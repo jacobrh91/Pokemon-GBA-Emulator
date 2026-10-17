@@ -5,14 +5,18 @@
 //! can be tested without a window.
 
 mod cheat_menu;
+mod controls_menu;
 mod draw;
 mod layout;
 mod speed;
 
+use crate::frontend::input::{Bindings, Control};
 pub use cheat_menu::MenuNav;
 use cheat_menu::{CheatMenu, MenuLayout};
+use controls_menu::{ControlsLayout, ControlsMenu};
 use gba_emulator::cheats::options::CheatOptions;
 use layout::{KNOB_RADIUS, Layout};
+use minifb::Key;
 pub use speed::SpeedSetting;
 
 /// Height of the strip along the bottom of the window that keeps the dock
@@ -47,6 +51,7 @@ pub struct Dock {
     quit_requested: bool,
     fullscreen_requested: bool,
     menu: CheatMenu,
+    controls: ControlsMenu,
 }
 
 impl Dock {
@@ -64,6 +69,7 @@ impl Dock {
             quit_requested: false,
             fullscreen_requested: false,
             menu: CheatMenu::new(),
+            controls: ControlsMenu::new(),
         }
     }
 
@@ -82,14 +88,47 @@ impl Dock {
         self.menu.take_changed().then(|| self.menu.options())
     }
 
-    /// Whether the cheat menu is open.
+    /// Whether a menu is open: the game gets no buttons then.
     pub fn menu_open(&self) -> bool {
+        self.menu.is_open() || self.controls.is_open()
+    }
+
+    /// Whether the cheat menu is open, so the keys drive it.
+    pub fn cheat_menu_open(&self) -> bool {
         self.menu.is_open()
     }
 
     /// Opens or closes the cheat menu (Tab, like its dock button).
     pub fn toggle_menu(&mut self) {
+        self.controls.close();
         self.menu.toggle();
+    }
+
+    /// The key bindings, as set in the controls menu.
+    pub fn bindings(&self) -> &Bindings {
+        self.controls.bindings()
+    }
+
+    /// Restores the key bindings (from saved settings).
+    pub fn set_bindings(&mut self, bindings: Bindings) {
+        self.controls.set_bindings(bindings);
+    }
+
+    /// The bindings, once after they were changed in the menu.
+    pub fn take_bindings_change(&mut self) -> Option<Bindings> {
+        self.controls
+            .take_changed()
+            .then(|| self.controls.bindings().clone())
+    }
+
+    /// The control the controls menu waits to hear a key for, if any.
+    pub fn controls_waiting(&self) -> Option<Control> {
+        self.controls.waiting()
+    }
+
+    /// Hands a pressed key to the control that waits for one.
+    pub fn controls_key_pressed(&mut self, key: Key) {
+        self.controls.key_pressed(key);
     }
 
     /// Tells the dock how many codes the cheats file holds; the cheat menu
@@ -98,9 +137,15 @@ impl Dock {
         self.menu.set_file_codes_available(count);
     }
 
-    /// A keyboard action on the open cheat menu.
+    /// A keyboard action on the open menu. The controls menu only takes B.
     pub fn menu_navigate(&mut self, nav: MenuNav) {
-        self.menu.navigate(nav);
+        if self.controls.is_open() {
+            if nav == MenuNav::Back {
+                self.controls.back();
+            }
+        } else {
+            self.menu.navigate(nav);
+        }
     }
 
     /// Reports, every frame, whether the A key is held, so a level button
@@ -188,7 +233,7 @@ impl Dock {
             .is_some_and(|(_, y)| y >= height as f32 - HOVER_ZONE);
         let active = pointer.position.is_some()
             && (in_hover_zone || self.idle_frames < HIDE_AFTER_IDLE_FRAMES);
-        let target = if active || self.dragging || self.menu.is_open() {
+        let target = if active || self.dragging || self.menu_open() {
             1.0
         } else {
             0.0
@@ -210,15 +255,24 @@ impl Dock {
             // The menu sits above the dock; a click on it is not also a click
             // on whatever is underneath.
             let menu_layout = MenuLayout::new(width, layout.dock, self.menu.has_file_row());
-            let over_menu = self.menu.update(pointer, pressed, &menu_layout);
+            let controls_layout = ControlsLayout::new(width, layout.dock);
+            let over_menu = self.menu.update(pointer, pressed, &menu_layout)
+                || self.controls.update(pointer, pressed, &controls_layout);
             if pressed && !over_menu {
-                if self.menu.is_open() && !layout.cheats.contains(x, y) {
+                if self.menu_open()
+                    && !layout.cheats.contains(x, y)
+                    && !layout.settings.contains(x, y)
+                {
                     // Clicking anywhere else dismisses the menu, and still
                     // reaches the control that was clicked.
                     self.menu.close();
+                    self.controls.close();
                 }
                 if layout.cheats.contains(x, y) {
-                    self.menu.toggle();
+                    self.toggle_menu();
+                } else if layout.settings.contains(x, y) {
+                    self.menu.close();
+                    self.controls.toggle();
                 } else if layout.power.contains(x, y) {
                     self.quit_requested = true;
                 } else if layout.restart.contains(x, y) {

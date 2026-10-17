@@ -19,8 +19,7 @@ use gba_emulator::mmu::ROM_START;
 use gba_emulator::ppu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use gba_emulator::settings::Settings;
 use input::{
-    ButtonGate, CHEAT_MENU_KEY, EscapeAction, LOAD_STATE_KEY, MENU_KEYS, SAVE_STATE_KEY,
-    buttons_from_keys, escape_action, fast_forward_held,
+    Bindings, ButtonGate, Control, EscapeAction, LOAD_STATE_KEY, SAVE_STATE_KEY, escape_action,
 };
 use minifb::{Key, MouseMode, Scale, ScaleMode, Window, WindowOptions};
 use settings_sync::SettingsSync;
@@ -97,6 +96,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         // release binary's drawing code is exercised without a mouse.
         dock.open_everything_for_smoke_test();
     }
+    dock.set_bindings(Bindings::from_settings(&settings.key_bindings));
     dock.set_muted(settings.muted);
     dock.set_speed(SpeedSetting::from_multiple(settings.fast_forward));
     let mut restore_fullscreen = settings.fullscreen;
@@ -124,9 +124,20 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
                 EscapeAction::Quit => break,
             }
         }
-        handle_keys(&window, &mut dock, &shared, &mut button_gate);
+        if dock.controls_waiting().is_some() {
+            // The controls menu is waiting for a key: it takes the next press,
+            // and the game and the other shortcuts see nothing.
+            for key in window.get_keys_pressed(minifb::KeyRepeat::No) {
+                dock.controls_key_pressed(key);
+            }
+            shared.buttons.store(0, Ordering::Relaxed);
+        } else {
+            handle_keys(&window, &mut dock, &shared, &mut button_gate);
+        }
 
-        let fast_forwarding = fast_forward_held(|key| window.is_key_down(key));
+        let fast_forwarding = dock
+            .bindings()
+            .fast_forward_held(|key| window.is_key_down(key));
         shared
             .fast_forward
             .store(fast_forwarding, Ordering::Relaxed);
@@ -140,6 +151,9 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         dock.update(pointer, WINDOW_WIDTH, WINDOW_HEIGHT);
         if let Some(options) = dock.take_cheat_options_change() {
             shared.set_cheat_options(options);
+        }
+        if let Some(bindings) = dock.take_bindings_change() {
+            sync.record_key_bindings(bindings.to_settings());
         }
 
         // Show the floppy-disk icon for a moment after a state is saved or
@@ -350,7 +364,10 @@ fn pointer_state(window: &Window) -> Pointer {
 /// Acts on the keys: the cheat menu, the save state, the cheat menu's own
 /// navigation while it is open, and the game's buttons.
 fn handle_keys(window: &Window, dock: &mut Dock, shared: &Shared, button_gate: &mut ButtonGate) {
-    if window.is_key_pressed(CHEAT_MENU_KEY, minifb::KeyRepeat::No) {
+    if window.is_key_pressed(
+        dock.bindings().key(Control::CheatMenu),
+        minifb::KeyRepeat::No,
+    ) {
         dock.toggle_menu();
     }
     if window.is_key_pressed(SAVE_STATE_KEY, minifb::KeyRepeat::No) {
@@ -361,8 +378,9 @@ fn handle_keys(window: &Window, dock: &mut Dock, shared: &Shared, button_gate: &
     }
     // While the cheat menu is open the movement keys drive it, and the game
     // sees no buttons.
-    if dock.menu_open() {
-        for (key, nav, repeats) in MENU_KEYS {
+    let menu_keys = dock.bindings().menu_keys();
+    if dock.cheat_menu_open() {
+        for (key, nav, repeats) in menu_keys.iter().copied() {
             let repeat = if repeats {
                 minifb::KeyRepeat::Yes
             } else {
@@ -374,15 +392,15 @@ fn handle_keys(window: &Window, dock: &mut Dock, shared: &Shared, button_gate: &
         }
     }
     dock.menu_hold_toggle(
-        dock.menu_open()
-            && MENU_KEYS
+        dock.cheat_menu_open()
+            && menu_keys
                 .iter()
                 .any(|(key, nav, _)| *nav == MenuNav::Toggle && window.is_key_down(*key)),
     );
     shared.buttons.store(
         button_gate.apply(
             dock.menu_open(),
-            buttons_from_keys(|key| window.is_key_down(key)),
+            dock.bindings().buttons(|key| window.is_key_down(key)),
         ),
         Ordering::Relaxed,
     );

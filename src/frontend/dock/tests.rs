@@ -395,7 +395,7 @@ fn centre_of(rect: crate::frontend::draw::Rect) -> (f32, f32) {
 }
 
 #[test]
-fn the_cheats_button_is_the_rightmost_control_of_the_dock() {
+fn the_cheats_button_and_the_cog_are_the_rightmost_controls_of_the_dock() {
     let layout = Layout::new(W, H);
     for other in layout.speed_buttons {
         assert!(other.x + other.width < layout.cheats_divider_x);
@@ -404,9 +404,11 @@ fn the_cheats_button_is_the_rightmost_control_of_the_dock() {
         assert!(other.x + other.width < layout.cheats.x);
     }
     assert!(layout.cheats_divider_x < layout.cheats.x);
-    // It ends where the dock's padding begins, and the dock still fits.
+    // The cog ends where the dock's padding begins, after the cheats button,
+    // and the dock still fits.
+    assert!(layout.cheats.x + layout.cheats.width < layout.settings.x);
     assert_eq!(
-        layout.cheats.x + layout.cheats.width,
+        layout.settings.x + layout.settings.width,
         layout.dock.x + layout.dock.width - DOCK_PADDING
     );
     assert!(layout.dock.x >= 0 && layout.dock.x + layout.dock.width <= W as i32);
@@ -588,4 +590,81 @@ fn the_menu_has_a_cheats_file_row_only_when_the_file_has_codes() {
     assert!(change.file_codes);
     click_at(&mut dock, centre_of(with.file_codes.unwrap()));
     assert!(!dock.cheat_options().file_codes);
+}
+
+#[test]
+fn the_cog_opens_and_closes_the_controls_menu() {
+    let layout = Layout::new(W, H);
+    let cog = centre_of(layout.settings);
+    let mut dock = Dock::new(0.5);
+    settle(&mut dock, hover(cog.0, cog.1));
+    assert!(!dock.menu_open());
+
+    click_at(&mut dock, cog);
+    assert!(dock.menu_open());
+    assert!(!dock.cheat_menu_open(), "it is not the cheat menu");
+    click_at(&mut dock, cog);
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn only_one_of_the_two_menus_is_open_at_a_time() {
+    let layout = Layout::new(W, H);
+    let (cog, cheats) = (centre_of(layout.settings), centre_of(layout.cheats));
+    let mut dock = Dock::new(0.5);
+    settle(&mut dock, hover(cog.0, cog.1));
+    click_at(&mut dock, cog);
+    assert!(dock.menu_open() && !dock.cheat_menu_open());
+    // The cheats button swaps them, and so does Tab.
+    click_at(&mut dock, cheats);
+    assert!(dock.cheat_menu_open());
+    click_at(&mut dock, cog);
+    assert!(dock.menu_open() && !dock.cheat_menu_open());
+    dock.toggle_menu();
+    assert!(dock.cheat_menu_open());
+    dock.toggle_menu();
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn a_click_elsewhere_closes_the_controls_menu_and_b_closes_it_too() {
+    let layout = Layout::new(W, H);
+    let cog = centre_of(layout.settings);
+    let mut dock = Dock::new(0.5);
+    settle(&mut dock, hover(cog.0, cog.1));
+    click_at(&mut dock, cog);
+    // A click on the dock's mute icon closes it and still works.
+    click_at(&mut dock, centre_of(layout.icon));
+    assert!(!dock.menu_open());
+    assert!(dock.is_muted());
+
+    click_at(&mut dock, cog);
+    dock.menu_navigate(MenuNav::Down);
+    assert!(dock.menu_open(), "only B acts on the controls menu");
+    dock.menu_navigate(MenuNav::Back);
+    assert!(!dock.menu_open());
+}
+
+#[test]
+fn a_key_bound_in_the_controls_menu_reaches_the_dock_and_is_reported_once() {
+    use crate::frontend::dock::controls_menu::ControlsLayout;
+    use crate::frontend::input::Control;
+    let layout = Layout::new(W, H);
+    let cog = centre_of(layout.settings);
+    let menu_layout = ControlsLayout::new(W, layout.dock);
+    let mut dock = Dock::new(0.5);
+    settle(&mut dock, hover(cog.0, cog.1));
+    click_at(&mut dock, cog);
+    assert_eq!(dock.controls_waiting(), None);
+    assert!(dock.take_bindings_change().is_none());
+
+    click_at(&mut dock, centre_of(menu_layout.keys[4]));
+    assert_eq!(dock.controls_waiting(), Some(Control::A));
+    assert!(dock.menu_open(), "a click on the panel keeps it open");
+    dock.controls_key_pressed(minifb::Key::Z);
+    assert_eq!(dock.controls_waiting(), None);
+    let bindings = dock.take_bindings_change().expect("changed");
+    assert_eq!(bindings.key(Control::A), minifb::Key::Z);
+    assert!(dock.take_bindings_change().is_none());
+    assert_eq!(dock.bindings().key(Control::A), minifb::Key::Z);
 }

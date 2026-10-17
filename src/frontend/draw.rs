@@ -189,6 +189,45 @@ impl Canvas<'_> {
         self.rect(cx - 1, cy - radius - 3, 3, radius + 3, color);
     }
 
+    /// A cog: a filled disc with eight rounded teeth and a hole in the middle,
+    /// `radius` pixels from its centre to the tip of a tooth, smoothed by
+    /// supersampling. A tooth points to the right.
+    pub(crate) fn gear(&mut self, cx: i32, cy: i32, radius: i32, color: u32) {
+        const SAMPLES: i32 = 4;
+        const TEETH: f32 = 8.0;
+        let tip = radius as f32;
+        let body = tip * 0.78;
+        let hole = tip * 0.36;
+        // Whether the point (in pixels from the centre) is part of the cog.
+        let inside = |x: f32, y: f32| {
+            let distance = x.hypot(y);
+            if distance < hole {
+                return false;
+            }
+            // A tooth is the part of each eighth of a turn where the cosine of
+            // eight times the angle is high; its flanks slope smoothly.
+            let wave = (y.atan2(x) * TEETH).cos();
+            let reach = body + (tip - body) * ((wave + 0.1) * 4.0).clamp(0.0, 1.0);
+            distance <= reach
+        };
+        for dy in -radius - 1..=radius + 1 {
+            for dx in -radius - 1..=radius + 1 {
+                let mut covered = 0;
+                for sy in 0..SAMPLES {
+                    for sx in 0..SAMPLES {
+                        let x = dx as f32 + (sx as f32 + 0.5) / SAMPLES as f32 - 0.5;
+                        let y = dy as f32 + (sy as f32 + 0.5) / SAMPLES as f32 - 0.5;
+                        covered += i32::from(inside(x, y));
+                    }
+                }
+                if covered > 0 {
+                    let alpha = covered as f32 / (SAMPLES * SAMPLES) as f32;
+                    self.blend(cx + dx, cy + dy, color, alpha);
+                }
+            }
+        }
+    }
+
     pub(crate) fn circle(&mut self, cx: i32, cy: i32, radius: i32, color: u32) {
         for dy in -radius..=radius {
             for dx in -radius..=radius {
@@ -434,6 +473,36 @@ mod tests {
         assert!(gap, "open gap on the right-hand side");
         // The head adds weight beyond the plain ring.
         assert!(painted(&buffer) > 100);
+    }
+
+    #[test]
+    fn the_gear_has_a_hole_a_body_and_eight_teeth() {
+        let size = 40;
+        let mut buffer = vec![0u32; (size * size) as usize];
+        Canvas::new(&mut buffer, size as usize, size as usize, 0).gear(20, 20, 12, 1);
+        let at = |dx: i32, dy: i32| buffer[((20 + dy) * size + 20 + dx) as usize];
+        assert_eq!(at(0, 0), 0, "the hole");
+        assert_eq!(at(7, 0), 1, "the body");
+        assert_eq!(at(0, -7), 1, "the body, above");
+        // A tooth points right (and every eighth of a turn); between two teeth
+        // the edge is lower.
+        assert_eq!(at(11, 0), 1, "a tooth");
+        assert_eq!(at(0, 11), 1, "a tooth, below");
+        assert_eq!(at(8, 8), 1, "a diagonal tooth, tip at 45 degrees");
+        // Past a tooth's tip, and in the gap beside one.
+        assert_eq!(at(14, 0), 0, "outside");
+        let gap = (
+            11.0_f32 * (22.5_f32).to_radians().cos(),
+            11.0_f32 * (22.5_f32).to_radians().sin(),
+        );
+        assert_eq!(
+            at(gap.0.round() as i32, gap.1.round() as i32),
+            0,
+            "between teeth"
+        );
+        // Nothing is painted outside the window of its own size.
+        let painted = buffer.iter().filter(|p| **p == 1).count();
+        assert!(painted > 200 && painted < 600, "{painted}");
     }
 
     #[test]
