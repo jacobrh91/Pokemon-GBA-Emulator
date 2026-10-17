@@ -92,6 +92,7 @@ pub(super) enum FocusRow {
     Experience,
     Shiny,
     NoEncounters,
+    FastBattles,
 }
 
 /// Species-list rows: "ANY" followed by the 251 species.
@@ -199,6 +200,7 @@ pub(super) struct MenuLayout {
     pub(super) shiny_value: Rect,
     pub(super) shiny_plus: Rect,
     pub(super) no_encounters: Rect,
+    pub(super) fast_battles: Rect,
     /// The boxes of the always-on rows (last in the list), which are only
     /// shown: see [`ALWAYS_ON`].
     pub(super) always_on: [Rect; ALWAYS_ON.len()],
@@ -235,12 +237,13 @@ impl MenuLayout {
         // Rows, top to bottom: (centre y) of each.
         let row_file = y + 78;
         let row_wild = y + 78 + extra;
-        let row_perfect = y + 126 + extra;
-        let row_money = y + 170 + extra;
-        let row_catch = y + 214 + extra;
-        let row_exp = y + 258 + extra;
-        let row_shiny = y + 302 + extra;
-        let row_no_encounters = y + 346 + extra;
+        let row_perfect = y + 118 + extra;
+        let row_money = y + 156 + extra;
+        let row_catch = y + 194 + extra;
+        let row_exp = y + 232 + extra;
+        let row_shiny = y + 270 + extra;
+        let row_no_encounters = y + 308 + extra;
+        let row_fast_battles = y + 346 + extra;
         // The always-on rows are only shown, so they sit closer together.
         let row_always_on = |index: usize| y + 390 + extra + ALWAYS_ON_PITCH * index as i32;
 
@@ -337,6 +340,7 @@ impl MenuLayout {
             shiny_value,
             shiny_plus,
             no_encounters: checkbox_at(left, row_no_encounters),
+            fast_battles: checkbox_at(left, row_fast_battles),
             always_on: std::array::from_fn(|index| checkbox_at(left, row_always_on(index))),
             list: Rect {
                 x: dropdown.x,
@@ -358,6 +362,7 @@ impl MenuLayout {
             FocusRow::Experience => self.exp_boost,
             FocusRow::Shiny => self.shiny,
             FocusRow::NoEncounters => self.no_encounters,
+            FocusRow::FastBattles => self.fast_battles,
         }
     }
 
@@ -430,7 +435,7 @@ impl CheatMenu {
 
     /// The rows the keyboard reaches, top to bottom.
     fn focus_rows(&self) -> Vec<FocusRow> {
-        let mut rows = Vec::with_capacity(8);
+        let mut rows = Vec::with_capacity(9);
         if self.has_file_row() {
             rows.push(FocusRow::FileCodes);
         }
@@ -442,6 +447,7 @@ impl CheatMenu {
             FocusRow::Experience,
             FocusRow::Shiny,
             FocusRow::NoEncounters,
+            FocusRow::FastBattles,
         ]);
         rows
     }
@@ -568,6 +574,7 @@ impl CheatMenu {
                 FocusRow::Experience => options.exp_boost = !options.exp_boost,
                 FocusRow::Shiny => options.shiny = !options.shiny,
                 FocusRow::NoEncounters => options.no_encounters = !options.no_encounters,
+                FocusRow::FastBattles => options.fast_battles = !options.fast_battles,
             },
             MenuNav::Back => {}
         }
@@ -774,6 +781,8 @@ impl CheatMenu {
                 options.shiny_odds = options.shiny_odds.stepped(1);
             } else if layout.no_encounters.inflated(4).contains(x, y) {
                 options.no_encounters = !options.no_encounters;
+            } else if layout.fast_battles.inflated(4).contains(x, y) {
+                options.fast_battles = !options.fast_battles;
             } else if layout
                 .file_codes
                 .is_some_and(|r| r.inflated(4).contains(x, y))

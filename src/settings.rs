@@ -145,6 +145,7 @@ impl Settings {
                 "cheat_catch_always" => set_flag(value, &mut settings.cheat_options.catch_always),
                 "cheat_no_encounters" => set_flag(value, &mut settings.cheat_options.no_encounters),
                 "cheat_exp_boost" => set_flag(value, &mut settings.cheat_options.exp_boost),
+                "cheat_fast_battles" => set_flag(value, &mut settings.cheat_options.fast_battles),
                 "cheat_wild_enabled" => {
                     wild_switch_seen = true;
                     set_flag(value, &mut settings.cheat_options.wild_enabled);
@@ -219,6 +220,7 @@ impl Settings {
         flag("cheat_catch_always", options.catch_always);
         flag("cheat_no_encounters", options.no_encounters);
         flag("cheat_exp_boost", options.exp_boost);
+        flag("cheat_fast_battles", options.fast_battles);
         if options.shiny_odds != ShinyOdds::default() {
             text.push_str(&format!(
                 "cheat_shiny_odds = {}\n",
@@ -306,6 +308,7 @@ mod tests {
                 perfect_enabled: true,
                 infinite_money: true,
                 no_encounters: true,
+                fast_battles: true,
                 ..CheatOptions::default()
             },
             // (How a scan is written and read is tested with `CheatScan`.)

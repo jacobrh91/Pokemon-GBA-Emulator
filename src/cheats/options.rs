@@ -116,6 +116,9 @@ pub struct CheatOptions {
     /// All experience gained is boosted: every Pokémon is treated as a traded
     /// one (FireRed / LeafGreen / Emerald).
     pub exp_boost: bool,
+    /// The emulator runs flat out while a battle is on (Emerald; FireRed and
+    /// LeafGreen in English).
+    pub fast_battles: bool,
     /// The `.cheats` file's codes are applied. Never saved: they can crash
     /// the game if on before it has loaded what they patch.
     pub file_codes: bool,

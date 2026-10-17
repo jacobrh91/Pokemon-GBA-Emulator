@@ -193,7 +193,8 @@ pub(super) fn emulation_loop(
         sync_cheat_options(shared, &mut applied_options_version, &mut emulator);
 
         // Fast-forward only draws the frames that will be shown.
-        let fast_forward = shared.fast_forward.load(Ordering::Relaxed);
+        let key_held = shared.fast_forward.load(Ordering::Relaxed);
+        let fast_forward = key_held || emulator.battle_speedup_active();
         let draw_frame = !fast_forward || last_publish.elapsed() >= FAST_FORWARD_PUBLISH_INTERVAL;
         emulator.set_rendering(draw_frame);
 
@@ -249,7 +250,13 @@ pub(super) fn emulation_loop(
         }
 
         if fast_forward {
-            let target = shared.fast_forward_target.load(Ordering::Relaxed);
+            // The speed-up of a battle is always flat out; the key's is the
+            // chosen speed.
+            let target = if key_held {
+                shared.fast_forward_target.load(Ordering::Relaxed)
+            } else {
+                0
+            };
             if target == 0 {
                 // MAX: no pacing.
                 next_frame = Instant::now();

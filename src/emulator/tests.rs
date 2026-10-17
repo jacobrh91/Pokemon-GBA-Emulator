@@ -1,5 +1,6 @@
 use super::*;
-use crate::mmu::IO_REG_START;
+use crate::cheats::options::CheatOptions;
+use crate::mmu::{IO_REG_START, MemoryBus};
 const MODE_SUPERVISOR: u32 = 0x13;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -575,11 +576,162 @@ fn skipping_does_not_change_frame_timing() {
         }
         assert_eq!(fast.cpu().cycles, plain.cpu().cycles);
     }
-    // Audio samples (every 512 cycles) bound each skip: about 18x fewer.
+    // Nothing the CPU can see happens, so a frame takes a few steps.
     assert!(
-        fast_steps * 10 < plain_steps,
+        fast_steps * 1000 < plain_steps,
         "{fast_steps} vs {plain_steps}"
     );
+}
+
+/// Runs a bare `b .` with interrupts on until the CPU enters IRQ mode; returns
+/// `(cycles at the interrupt, steps taken)`.
+fn spin_until_interrupt(skipping: bool, setup: impl Fn(&mut MemoryBus)) -> (u64, u64) {
+    let mut emulator = emulator_for(&[0xEAFF_FFFE], skipping);
+    emulator
+        .memory_mut()
+        .write_u32(0x0300_7FFC, 0x0300_3580)
+        .unwrap();
+    setup(emulator.memory_mut());
+    emulator
+        .memory_mut()
+        .write_u16(IO_REG_START + 0x208, 1)
+        .unwrap();
+    let mut steps = 0;
+    while emulator.cpu().mode() != 0x12 {
+        emulator.step().unwrap();
+        // Hand over finished frames as the emulator's user does.
+        emulator.take_frame_ready();
+        steps += 1;
+        assert!(steps < 5_000_000, "no interrupt came");
+    }
+    (emulator.cpu().cycles, steps)
+}
+
+#[test]
+fn interrupts_end_a_skipped_spin_on_the_same_cycle() {
+    let io = IO_REG_START;
+    type Setup<'a> = (&'a str, &'a dyn Fn(&mut MemoryBus));
+    let sources: [Setup; 5] = [
+        ("vblank", &|memory| {
+            memory.write_u16(io + 0x004, 1 << 3).unwrap();
+            memory.write_u16(io + 0x200, 1).unwrap();
+        }),
+        ("hblank", &|memory| {
+            memory.write_u16(io + 0x004, 1 << 4).unwrap();
+            memory.write_u16(io + 0x200, 1 << 1).unwrap();
+        }),
+        ("vcount", &|memory| {
+            memory.write_u16(io + 0x004, 1 << 5 | 100 << 8).unwrap();
+            memory.write_u16(io + 0x200, 1 << 2).unwrap();
+        }),
+        ("timer", &|memory| {
+            memory.write_u16(io + 0x108, 0xC000).unwrap();
+            memory.write_u16(io + 0x10A, 0x00C1).unwrap();
+            memory.write_u16(io + 0x200, 1 << 5).unwrap();
+        }),
+        ("dma", &|memory| {
+            memory
+                .write_u32(io + 0xB0, crate::mmu::EWRAM_START)
+                .unwrap();
+            memory
+                .write_u32(io + 0xB4, crate::mmu::IWRAM_START)
+                .unwrap();
+            memory.write_u16(io + 0xB8, 1).unwrap();
+            // Enabled, VBlank timing, interrupt when done.
+            memory
+                .write_u16(io + 0xBA, 0x8000 | 1 << 14 | 1 << 12)
+                .unwrap();
+            memory.write_u16(io + 0x200, 1 << 8).unwrap();
+        }),
+    ];
+    for (name, setup) in sources {
+        let plain = spin_until_interrupt(false, setup);
+        let fast = spin_until_interrupt(true, setup);
+        assert_eq!(fast.0, plain.0, "{name}: interrupt lands on the same cycle");
+        assert!(
+            fast.1 * 2 < plain.1,
+            "{name}: skipping should remove most steps: {} vs {}",
+            fast.1,
+            plain.1
+        );
+    }
+}
+
+#[test]
+fn a_loop_polling_the_display_status_exits_on_the_same_cycle_when_skipped() {
+    // ldr r1,=DISPSTAT; loop: ldrh r0,[r1]; tst r0,#1; beq loop; b .
+    let program = [
+        0xE59F_100C,
+        0xE1D1_00B0,
+        0xE310_0001,
+        0x0AFF_FFFC,
+        0xEAFF_FFFE,
+        0x0400_0004,
+    ];
+    let mut plain = emulator_for(&program, false);
+    let mut fast = emulator_for(&program, true);
+
+    let (plain_cycles, plain_steps) = run_to_pc(&mut plain, ROM_START + 0x10);
+    let (fast_cycles, fast_steps) = run_to_pc(&mut fast, ROM_START + 0x10);
+
+    assert!(plain_cycles > 1232 * 160, "waited for VBlank");
+    assert_eq!(fast_cycles, plain_cycles);
+    assert_eq!(fast.cpu().registers, plain.cpu().registers);
+    // Each scanline event ends a skip, as the status changes there.
+    assert!(
+        fast_steps * 3 < plain_steps,
+        "skipping should remove steps: {fast_steps} vs {plain_steps}"
+    );
+}
+
+/// An emulator for a ROM image whose header carries `game_code`.
+fn emulator_with_game_code(game_code: &[u8; 4]) -> Emulator {
+    let mut rom = vec![0u8; 0x200];
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    let id = NEXT_TEST_FILE.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "gba-emulator-battle-test-{}-{id}.gba",
+        std::process::id()
+    ));
+    fs::write(&path, rom).unwrap();
+    let emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    fs::remove_file(path).unwrap();
+    emulator
+}
+
+#[test]
+fn the_battle_speedup_needs_the_option_a_known_game_and_a_battle() {
+    let fast = CheatOptions {
+        fast_battles: true,
+        ..CheatOptions::default()
+    };
+    // Emerald's flag: bit 1 of the byte at gMain + 0x439.
+    let flag = 0x0300_22C0 + 0x439;
+    let mut emerald = emulator_with_game_code(b"BPEE");
+    emerald.memory_mut().write_u8(flag, 0x02).unwrap();
+    assert!(!emerald.battle_speedup_active(), "the option is off");
+    emerald.set_cheat_options(fast);
+    assert!(emerald.battle_speedup_active());
+    emerald.memory_mut().write_u8(flag, 0x01).unwrap();
+    assert!(!emerald.battle_speedup_active(), "no battle");
+    emerald.memory_mut().write_u8(flag, 0x03).unwrap();
+    assert!(emerald.battle_speedup_active(), "other bits do not matter");
+
+    // FireRed keeps it elsewhere; other games have none.
+    let mut firered = emulator_with_game_code(b"BPRE");
+    firered.set_cheat_options(fast);
+    firered
+        .memory_mut()
+        .write_u8(0x0300_30F0 + 0x439, 2)
+        .unwrap();
+    assert!(firered.battle_speedup_active());
+    for code in [b"BPRJ", b"AXVE"] {
+        let mut other = emulator_with_game_code(code);
+        other.set_cheat_options(fast);
+        other.memory_mut().write_u8(flag, 2).unwrap();
+        other.memory_mut().write_u8(0x0300_30F0 + 0x439, 2).unwrap();
+        assert!(!other.battle_speedup_active());
+    }
 }
 
 #[test]

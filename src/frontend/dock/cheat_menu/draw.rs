@@ -201,6 +201,8 @@ impl CheatMenu {
         );
         checkbox(canvas, layout.no_encounters, options.no_encounters);
         checkbox_label(canvas, layout.no_encounters, "NO RANDOM ENCOUNTERS");
+        checkbox(canvas, layout.fast_battles, options.fast_battles);
+        checkbox_label(canvas, layout.fast_battles, "MAX SPEED IN BATTLES");
         // Always on: ticked, dimmed, tagged, and not a control.
         for (rect, label) in layout.always_on.into_iter().zip(ALWAYS_ON) {
             canvas.rounded_rect(rect, 6, TRACK_COLOR, 0.8);

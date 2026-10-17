@@ -64,6 +64,7 @@ fn the_panel_fits_the_window_and_holds_every_control() {
     );
     for rect in layout.always_on.into_iter().chain([
         layout.no_encounters,
+        layout.fast_battles,
         layout.shiny,
         layout.wild_enable,
         layout.perfect_enable,
@@ -105,7 +106,7 @@ fn every_rows_own_checkbox_toggles_just_that_cheat_and_reports_one_change() {
     assert!(!menu.take_changed());
 
     type Pick = fn(&CheatOptions) -> bool;
-    let cases: [(Rect, Pick); 7] = [
+    let cases: [(Rect, Pick); 8] = [
         (layout.wild_enable, |o| o.wild_enabled),
         (layout.perfect_enable, |o| o.perfect_enabled),
         (layout.money, |o| o.infinite_money),
@@ -113,6 +114,7 @@ fn every_rows_own_checkbox_toggles_just_that_cheat_and_reports_one_change() {
         (layout.exp_boost, |o| o.exp_boost),
         (layout.shiny, |o| o.shiny),
         (layout.no_encounters, |o| o.no_encounters),
+        (layout.fast_battles, |o| o.fast_battles),
     ];
     for (index, (rect, pick)) in cases.iter().enumerate() {
         assert!(
@@ -146,6 +148,7 @@ fn every_row_has_its_checkbox_in_one_column_at_the_left() {
         layout.exp_boost,
         layout.shiny,
         layout.no_encounters,
+        layout.fast_battles,
     ]
     .into_iter()
     .chain(layout.always_on)
@@ -291,10 +294,10 @@ fn the_open_species_list_sits_over_the_perfect_stats_dropdown() {
     // species rather than reaching the dropdown underneath.
     let layout = layout();
     // A point of the dropdown that lies under the list's left part (its right
-    // edge is the scrollbar).
+    // edge is the scrollbar), low enough to be over a species, not over ANY.
     let covered = (
         layout.perfect_dropdown.x as f32 + 10.0,
-        centre(layout.perfect_dropdown).1,
+        (layout.perfect_dropdown.y + layout.perfect_dropdown.height - 3) as f32,
     );
     assert!(layout.perfect_dropdown.contains(covered.0, covered.1));
     assert!(layout.list.contains(covered.0, covered.1));
@@ -648,6 +651,7 @@ fn drawing_every_state_stays_inside_the_window() {
                 catch_always: true,
                 exp_boost: true,
                 no_encounters: true,
+                fast_battles: true,
             },
             false,
         ),
@@ -687,7 +691,7 @@ fn drawing_every_state_stays_inside_the_window() {
 }
 
 #[test]
-fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_no_encounters_then_the_always_on_rows()
+fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_no_encounters_fast_battles_then_the_always_on_rows()
  {
     let layout = layout();
     let tops = [
@@ -698,6 +702,7 @@ fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_no_encounters_th
         layout.exp_boost.y,
         layout.shiny.y,
         layout.no_encounters.y,
+        layout.fast_battles.y,
     ];
     let tops: Vec<i32> = tops
         .into_iter()
@@ -713,6 +718,7 @@ fn the_rows_run_wild_perfect_stats_money_catch_experience_shiny_no_encounters_th
         layout.exp_boost,
         layout.shiny,
         layout.no_encounters,
+        layout.fast_battles,
         layout.level_minus,
     ] {
         assert!(rect.y < layout.always_on[0].y);
@@ -789,13 +795,14 @@ fn the_keyboard_moves_between_rows_and_wraps() {
         FocusRow::Experience,
         FocusRow::Shiny,
         FocusRow::NoEncounters,
+        FocusRow::FastBattles,
         FocusRow::Wild,
     ] {
         menu.navigate(MenuNav::Down);
         assert_eq!(menu.focused_row(), Some(expected));
     }
     menu.navigate(MenuNav::Up);
-    assert_eq!(menu.focused_row(), Some(FocusRow::NoEncounters), "wraps");
+    assert_eq!(menu.focused_row(), Some(FocusRow::FastBattles), "wraps");
     // Closing the menu forgets that the keyboard was used.
     menu.close();
     menu.open();
@@ -809,7 +816,7 @@ fn the_cheats_file_row_is_the_first_one_the_keyboard_reaches() {
     menu.navigate(MenuNav::Down);
     assert_eq!(menu.focused_row(), Some(FocusRow::FileCodes), "the top row");
     menu.navigate(MenuNav::Up);
-    assert_eq!(menu.focused_row(), Some(FocusRow::NoEncounters), "wraps up");
+    assert_eq!(menu.focused_row(), Some(FocusRow::FastBattles), "wraps up");
     menu.navigate(MenuNav::Down);
     assert_eq!(menu.focused_row(), Some(FocusRow::FileCodes));
     menu.navigate(MenuNav::Toggle);

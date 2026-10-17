@@ -65,6 +65,7 @@ game is played.
 | All experience is boosted | | **active** (FireRed / LeafGreen / Emerald); every Pokémon counts as traded (×1.5) |
 | Shiny chance | `-` / `+` steps 1/1, 1/2, 1/5, 1/10, 1/25, 1/50, 1/100, 1/500, 1/1000 (1/1 makes every Pokémon shiny, the default); Left / Right from the keyboard | **active** (FireRed / LeafGreen / Emerald) |
 | No random encounters | | **active** (FireRed / LeafGreen / Emerald) |
+| Max speed in battles | | **active** (Emerald; English FireRed / LeafGreen, not checked in a battle) |
 | No poison damage outside battle | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
 | TMs are infinitely usable | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
 | First Pokémon knows every HM | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
@@ -254,6 +255,18 @@ scan (`src/cheats/gen3/encounters.rs`).
 The hook is covered by a unit test that runs the function's real bytes in the
 emulator (`the_encounter_cheat_turns_every_yes_into_no`), the signature matches
 once in each of the three builds, and it was tried in the game on v1.1.
+
+### Max speed in battles (Emerald; English FireRed and LeafGreen)
+
+While a battle is on, the emulator runs flat out, as with the fast-forward key
+at MAX (audio is dropped, and the screen is drawn about 60 times a second), and
+returns to normal speed when it ends. A battle is recognised by the game's own
+flag: bit 1 of the byte at offset `0x439` of `gMain` (`inBattle`), at
+`0x030022C0` in Emerald and `0x030030F0` in FireRed and LeafGreen
+(`src/cheats/gen3/battle.rs`). Holding the fast-forward key still sets its own
+speed. Verified on Emerald from a save state in a battle (the flag reads set);
+for FireRed and LeafGreen the main callbacks at that address point into the ROM,
+but no battle state was available. The Japanese FireRed is not covered.
 
 ### Boosted experience (FireRed, LeafGreen and Emerald)
 
@@ -509,6 +522,7 @@ src/
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
       encounters.rs    no random encounters (the answer of the per-step dice roll)
+      battle.rs        whether a battle is on (for the max-speed-in-battles row)
       experience.rs    boosted experience (the OT ID IsTradedMon compares)
       money.rs         infinite money (the balance GetMoney returns)
       shiny.rs         shiny chance (the PID, inside the routine that builds a Pokémon)
@@ -536,8 +550,13 @@ Notable design points:
   timers and audio only when something observable is due, which is what makes
   the core fast.
 - **Exact idle-loop skipping.** A backward jump whose iteration provably changed
-  no state is repeated arithmetically up to the next event. It is validated to
-  produce cycle-identical results (see `emulator/tests.rs`).
+  no state is repeated arithmetically up to the next event the CPU can see (an
+  interrupt, a DMA transfer, the end of the frame), so a game's wait for VBlank
+  costs a few steps per frame whatever the scanline, audio and timer events in
+  between. A loop that polls the display status is only skipped up to the next
+  scanline event. It is validated to produce cycle-identical results (see
+  `emulator/tests.rs`); audio samples can differ by one sample's timing, as the
+  skip no longer lumps neighbouring audio events together.
 - **Scanline-synchronised video.** The bus snapshots the display registers as
   each visible line finishes, before HBlank DMA runs, and the PPU draws from the
   snapshot, so per-line scroll and window effects behave as on hardware.

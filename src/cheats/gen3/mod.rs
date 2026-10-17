@@ -4,6 +4,9 @@
 //! the ROM by its instruction bytes (a *signature scan*) and the emulator
 //! changes a register or a value when the CPU reaches that address.
 //!
+//! [`battle`] is not a cheat but what the fast-battles option asks: whether a
+//! battle is on.
+//!
 //! The cheats, by what they change (the ones marked *always on* have no row in
 //! the menu):
 //!
@@ -68,6 +71,7 @@
 //! differently has no match and is declined; for one with rewritten code,
 //! trace the game (see each cheat's notes) and add its own signature.
 
+pub mod battle;
 pub mod catch_rate;
 pub mod encounters;
 pub mod experience;
