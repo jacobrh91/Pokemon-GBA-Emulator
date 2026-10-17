@@ -1,18 +1,22 @@
-//! Built-in cheats for Pokémon FireRed, LeafGreen and Emerald. Unlike the raw codes of a `.cheats`
-//! file (see [`super::codebreaker`]), which write constants into RAM, these
-//! act on the game's own code: each finds a place in the ROM by its
-//! instruction bytes (a *signature scan*) and the emulator changes a register
-//! when the CPU reaches that address.
+//! Built-in cheats for Pokémon FireRed, LeafGreen and Emerald. Unlike the raw
+//! codes of a `.cheats` file (see [`super::codebreaker`]), which write
+//! constants into RAM, these act on the game's own code: each finds a place in
+//! the ROM by its instruction bytes (a *signature scan*) and the emulator
+//! changes a register or a value when the CPU reaches that address.
 //!
-//! * [`wild_species`]: replaces a function's arguments at its entry.
-//! * [`catch_rate`], [`shiny`], [`experience`]: replace a value in the middle
-//!   of a routine (the catch odds, a Pokémon's personality value, the OT ID
-//!   compared with the player's).
-//! * [`perfect_stats`]: the same place as `shiny`, setting the IVs.
-//! * [`encounters`], [`money`]: replace the value a function returns.
-//! * [`tm`]: replaces an argument just before a call; always on.
-//! * [`field_moves`]: replaces the answer of `MonKnowsMove` for the first party
-//!   slot and an HM move; always on. [`party_menu`] adds the HMs to that
+//! The cheats, by what they change (the ones marked *always on* have no row in
+//! the menu):
+//!
+//! * [`wild_species`]: a function's arguments at its entry.
+//! * [`catch_rate`], [`shiny`], [`experience`], [`field_poison`]: a value in
+//!   the middle of a routine (the catch odds, a Pokémon's personality value, the
+//!   OT ID compared with the player's, the ailment tested by the poison check;
+//!   the last is *always on*). [`perfect_stats`] uses the same place as
+//!   [`shiny`], for the IVs.
+//! * [`encounters`], [`money`]: the value a function returns.
+//! * [`tm`]: an argument just before a call (*always on*).
+//! * [`field_moves`]: the answer of `MonKnowsMove` for the first party slot and
+//!   an HM move (*always on*); [`party_menu`] adds field moves to that
 //!   Pokémon's START-menu list of actions.
 //!
 //! This module holds what they share: recognising one of the cartridges, the
@@ -30,8 +34,10 @@
 //!    signature can only match the game it was written for.
 //! 2. Every 2-byte-aligned offset is compared with the pattern; bytes that
 //!    differ between builds (`BL` targets, pool offsets) are wildcards.
-//! 3. There must be **exactly one** match. With none, or several, nothing is
-//!    hooked and the cheat reports itself unsupported rather than guessing.
+//! 3. There must be **exactly one** match (a cheat that has several places, such
+//!    as [`tm`], states how many it accepts). With none, or the wrong number,
+//!    nothing is hooked and the cheat reports itself unsupported rather than
+//!    guessing.
 //! 4. The hook address is `0x0800_0000` (where the ROM appears on the bus)
 //!    plus the match offset plus the offset of the instruction the cheat
 //!    cares about.
@@ -66,6 +72,7 @@ pub mod catch_rate;
 pub mod encounters;
 pub mod experience;
 pub mod field_moves;
+pub mod field_poison;
 pub mod money;
 pub mod party_menu;
 pub mod perfect_stats;
@@ -310,6 +317,8 @@ mod tests {
             field_moves: (u32, u32),
             /// The party menu's capture and append hooks.
             party_menu: (u32, u32),
+            /// The overworld poison check.
+            field_poison: u32,
         }
         let builds = [
             Build {
@@ -323,6 +332,7 @@ mod tests {
                 tm: &[0x0812_4EAC, 0x0812_4F78, 0x0812_5C80],
                 field_moves: (0x0812_5AE8, 0x0202_4284),
                 party_menu: (0x0812_2A22, 0x0812_2A9A),
+                field_poison: 0x080A_0640,
             },
             Build {
                 file: "Pokemon Fire Red/Pokemon Fire Red (v1.1).gba",
@@ -335,6 +345,7 @@ mod tests {
                 tm: &[0x0812_4F24, 0x0812_4FF0, 0x0812_5CF8],
                 field_moves: (0x0812_5B60, 0x0202_4284),
                 party_menu: (0x0812_2A9A, 0x0812_2B12),
+                field_poison: 0x080A_0654,
             },
             Build {
                 file: "Pokemon Fire Red/Pokemon Fire Red (J).gba",
@@ -347,6 +358,7 @@ mod tests {
                 tm: &[0x0812_5810, 0x0812_58DC, 0x0812_65CC],
                 field_moves: (0x0812_6434, 0x0202_41E4),
                 party_menu: (0x0812_31FE, 0x0812_3276),
+                field_poison: 0x080A_1918,
             },
             Build {
                 file: "Pokemon Leaf Green/Pokemon - Leaf Green (V1.1).gba",
@@ -359,6 +371,7 @@ mod tests {
                 tm: &[0x0812_4EFC, 0x0812_4FC8, 0x0812_5CD0],
                 field_moves: (0x0812_5B38, 0x0202_4284),
                 party_menu: (0x0812_2A72, 0x0812_2AEA),
+                field_poison: 0x080A_0628,
             },
             Build {
                 file: "Pokemon Emerald/Pokemon - Emerald (USA, Europe).gba",
@@ -371,6 +384,7 @@ mod tests {
                 tm: &[0x081B_6EEC],
                 field_moves: (0x081B_6D6C, 0x0202_44EC),
                 party_menu: (0x081B_343A, 0x081B_34AA),
+                field_poison: 0x080F_976C,
             },
         ];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("rom");
@@ -413,6 +427,11 @@ mod tests {
                 party_menu::Layout::FireRedLeafGreen
             };
             assert_eq!(menu.layout, expected_layout, "{file}: layout");
+            assert_eq!(
+                field_poison::find(&rom),
+                Some(build.field_poison),
+                "{file}: poison"
+            );
         }
     }
 }

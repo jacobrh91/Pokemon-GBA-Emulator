@@ -65,6 +65,7 @@ game is played.
 | All experience is boosted | | **active** (FireRed / LeafGreen / Emerald); every Pokémon counts as traded (×1.5) |
 | Shiny chance | `-` / `+` steps 1/1, 1/2, 1/5, 1/10, 1/25, 1/50, 1/100, 1/500, 1/1000 (1/1 makes every Pokémon shiny, the default); Left / Right from the keyboard | **active** (FireRed / LeafGreen / Emerald) |
 | No random encounters | | **active** (FireRed / LeafGreen / Emerald) |
+| No poison damage outside battle | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
 | TMs are infinitely usable | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
 | First Pokémon knows every HM | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
 
@@ -108,7 +109,6 @@ Ruby, Sapphire and other games are left alone.
 - **Wild encounters** are changed through the function hook described under
   *Wild species override*, in the builds listed there; they need no
   `.cheats` file.
-- **Rows tagged SOON** would be stored and shown but not change the game yet; every row is active at present, so none is tagged.
 
 ## Cheats
 
@@ -220,6 +220,25 @@ be CUT" and offers "Would you like to CUT it?"; answering yes plays the field-mo
 animation with the first Pokémon and the tree is gone. A unit test runs the
 function's real bytes for every supported game. The other builds have the
 same code (the scan finds it once in each), but were not run in the game.
+
+### No poison damage outside battle (FireRed, LeafGreen and Emerald)
+
+Every few steps the game calls `DoPoisonFieldEffect`, which goes through the
+party and takes one HP from each poisoned Pokémon (a Pokémon left at 0 faints,
+and if all do the game ends in a white-out), with a flash of the screen. The
+status is tested with `GetAilmentFromStatus(status) == AILMENT_PSN`; the emulator
+stops at that comparison and makes the ailment "none", so every Pokémon is
+skipped. This cheat is **always on** while a recognised ROM is loaded: it has no
+switch and the menu lists it with the other always-on rows, ticked and tagged
+ALWAYS ON. The poison itself is unchanged (it still shows in the party
+menu and a Pokémon can still be poisoned in battle, where the damage is a
+different routine); only the walking damage, the flash and the poison white-out
+stop. The place is found by a signature scan (`src/cheats/gen3/field_poison.rs`)
+and is the same bytes in all the games.
+
+Checked on LeafGreen v1.1 from the save state with a poisoned Pokémon (163 HP):
+after 30 seconds of walking its HP was 141 before the cheat existed and still
+163 with it (with no cheat option set at all). The other builds have the same bytes (the signature matches once in each).
 
 ### No random encounters (FireRed, LeafGreen and Emerald)
 
@@ -466,15 +485,20 @@ src/
   settings.rs  Per-game settings file (volume, window, speed)
   cheats/      Cheats, by mechanism:
     codebreaker.rs   CodeBreaker-format codes from a `.cheats` file (RAM writes)
-    gen3/            Built-in Pokémon cheats (FireRed, LeafGreen, Emerald) found by signature scan:
+    gen3/            Built-in Pokémon cheats (FireRed, LeafGreen, Emerald) found by signature scan
+                     (`mod.rs` holds the shared `Signature` scan and the known-builds table):
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
       encounters.rs    no random encounters (the answer of the per-step dice roll)
       experience.rs    boosted experience (the OT ID IsTradedMon compares)
       money.rs         infinite money (the balance GetMoney returns)
+      shiny.rs         shiny chance (the PID, inside the routine that builds a Pokémon)
       perfect_stats.rs perfect IVs (the fixed-IV local of the same routine)
       tm.rs            infinitely usable TMs (the count of the bag removal; always on)
-      shiny.rs         all Pokémon shiny (the PID, inside the routine that builds a Pokémon)
+      field_moves.rs   first Pokémon knows every HM (the answer of MonKnowsMove; always on)
+      party_menu.rs    ... and lists those moves in its START-menu actions
+      field_poison.rs  no poison damage outside battle (the ailment tested by the field check; always on)
+    scan.rs          Where each cheat hooks in a ROM, remembered in the settings file
     options.rs       The cheat menu's options
     species.rs       Names of the 251 original species
   state.rs     Binary codec for save states (each component saves its own fields)

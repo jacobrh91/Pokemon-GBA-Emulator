@@ -1,5 +1,7 @@
 use crate::cheats::Cheats;
-use crate::cheats::gen3::{experience, field_moves, money, party_menu, perfect_stats, shiny};
+use crate::cheats::gen3::{
+    experience, field_moves, field_poison, money, party_menu, perfect_stats, shiny,
+};
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -24,6 +26,12 @@ const NO_VALUE: u32 = u32::MAX;
 /// Catch `odds` that always pass the game's `odds > 254` test.
 const CATCH_ALWAYS_ODDS: u32 = 0xFF;
 
+/// `address` if the cheat that hooks there is on and its place was found,
+/// else `NO_HOOK`.
+fn armed(address: Option<u32>, on: bool) -> u32 {
+    address.filter(|_| on).unwrap_or(NO_HOOK)
+}
+
 /// Cycles a halted CPU advances per step.
 const HALT_STEP_CYCLES: u32 = 32;
 
@@ -40,30 +48,19 @@ pub struct Emulator {
     /// ROM address the cheats file's codes run at while enabled, or `NO_HOOK`.
     cheat_hook: u32,
     cheat_options: CheatOptions,
-    // Each built-in cheat has the address its signature scan found (`None`
-    // if the ROM is not recognised) and the hook that is armed while it is on.
-    create_wild_mon: Option<u32>,
-    catch_check: Option<u32>,
+    /// Where each built-in cheat hooks in this ROM, found by signature scans
+    /// (see `cheats::scan`); `None` where the ROM is not recognised. The
+    /// always-on cheats (TMs, HMs, poison) run at these addresses; the others
+    /// arm one of the hooks below while their row is on.
+    scan: CheatScan,
     catch_hook: u32,
-    shiny_point: Option<u32>,
     build_hook: u32,
-    money_balance: Option<u32>,
     money_hook: u32,
-    exp_traded: Option<u32>,
     exp_hook: u32,
-    encounter_roll: Option<u32>,
     encounter_hook: u32,
-    /// The two TM-use calls; the cheat is always on, so these are the hooks.
-    tm_uses: Vec<u32>,
-    /// Where `MonKnowsMove` ends and where the party array is, found by
-    /// signature scans (see `cheats::gen3::field_moves`); `None` if not
-    /// recognised. The cheat is always on, so this is the hook itself.
-    field_moves: Option<field_moves::FieldMoves>,
-    /// Where the party menu builds its list of actions, found by signature
-    /// scans (see `cheats::gen3::party_menu`); `None` if not recognised.
-    party_menu: Option<party_menu::PartyMenu>,
-    /// The address of that list and of its count, while the menu for the first
-    /// Pokémon is being built.
+    /// The address of the party menu's list of actions and of its count, while
+    /// the menu for the first Pokémon is being built (see
+    /// `cheats::gen3::party_menu`).
     party_actions: Option<(u32, u32)>,
     make_shiny: bool,
     /// With `make_shiny`: one Pokémon in this many is made shiny.
@@ -94,18 +91,7 @@ impl Emulator {
     /// of this ROM instead of scanning again (a scan of another ROM is ignored).
     pub fn with_cheat_scan(rom_path: &str, previous: Option<&CheatScan>) -> io::Result<Self> {
         let memory = MemoryBus::new(rom_path)?;
-        let CheatScan {
-            create_wild_mon,
-            catch_check,
-            shiny_point,
-            money_balance,
-            exp_traded,
-            encounter_roll,
-            tm_uses,
-            field_moves,
-            party_menu,
-            ..
-        } = CheatScan::for_rom(&memory.rom, previous);
+        let scan = CheatScan::for_rom(&memory.rom, previous);
         let mut emulator = Self {
             cpu: Cpu::default(),
             memory,
@@ -117,20 +103,12 @@ impl Emulator {
             rom_path: rom_path.to_owned(),
             cheats: Cheats::default(),
             cheat_hook: NO_HOOK,
-            create_wild_mon,
-            catch_check,
+            scan,
             catch_hook: NO_HOOK,
-            shiny_point,
             build_hook: NO_HOOK,
-            money_balance,
             money_hook: NO_HOOK,
-            exp_traded,
             exp_hook: NO_HOOK,
-            encounter_roll,
             encounter_hook: NO_HOOK,
-            tm_uses,
-            field_moves,
-            party_menu,
             party_actions: None,
             make_shiny: false,
             hook_filter: Box::new([0; HOOK_FILTER_BITS / 64]),
@@ -281,13 +259,16 @@ impl Emulator {
         for address in fixed {
             self.watch(address);
         }
-        for address in self.tm_uses.clone() {
+        for address in self.scan.tm_uses.clone() {
             self.watch(address);
         }
-        if let Some(moves) = self.field_moves {
+        if let Some(address) = self.scan.field_poison {
+            self.watch(address);
+        }
+        if let Some(moves) = self.scan.field_moves {
             self.watch(moves.knows_move_return);
         }
-        if let Some(menu) = self.party_menu {
+        if let Some(menu) = self.scan.party_menu {
             self.watch(menu.capture);
             self.watch(menu.append);
         }
@@ -317,12 +298,12 @@ impl Emulator {
             self.cpu.registers[0] = money::SHOWN_BALANCE;
         }
         // Infinite TMs (always on): ask the bag to remove none.
-        if self.tm_uses.contains(&pc_before) {
+        if self.scan.tm_uses.contains(&pc_before) {
             self.cpu.registers[1] = 0;
         }
         // The first Pokémon knows every HM (always on): at the end of
         // `MonKnowsMove`, `r6` is the Pokémon asked about, `r5` the move.
-        if let Some(moves) = self.field_moves
+        if let Some(moves) = self.scan.field_moves
             && pc_before == moves.knows_move_return
             && field_moves::acts_as_known(
                 self.cpu.registers[6],
@@ -333,7 +314,7 @@ impl Emulator {
             self.cpu.registers[0] = 1;
         }
         // The first Pokémon's party-menu actions list the HMs (always on).
-        if let Some(menu) = self.party_menu {
+        if let Some(menu) = self.scan.party_menu {
             if pc_before == menu.capture {
                 // `r10` is the selected slot; `r0` and `r1` the list and count.
                 let slot = self.cpu.registers[10] & 0xFF;
@@ -344,6 +325,10 @@ impl Emulator {
             }
         }
         // No random encounters: the dice roll always says no.
+        // No poison outside battle (always on): the status tested is "none".
+        if Some(pc_before) == self.scan.field_poison {
+            self.cpu.registers[0] = field_poison::NO_AILMENT;
+        }
         if pc_before == self.encounter_hook {
             self.cpu.registers[0] = 0;
         }
@@ -568,42 +553,28 @@ impl Emulator {
         } else {
             NO_HOOK
         };
-        self.catch_hook = match self.catch_check {
-            Some(address) if self.cheat_options.catch_always => address,
-            _ => NO_HOOK,
-        };
-        self.encounter_hook = match self.encounter_roll {
-            Some(address) if self.cheat_options.no_encounters => address,
-            _ => NO_HOOK,
-        };
-        self.exp_hook = match self.exp_traded {
-            Some(address) if self.cheat_options.exp_boost => address,
-            _ => NO_HOOK,
-        };
-        self.money_hook = match self.money_balance {
-            Some(address) if self.cheat_options.infinite_money => address,
-            _ => NO_HOOK,
-        };
+        let options = self.cheat_options;
+        self.catch_hook = armed(self.scan.catch_check, options.catch_always);
+        self.encounter_hook = armed(self.scan.encounter_roll, options.no_encounters);
+        self.exp_hook = armed(self.scan.exp_traded, options.exp_boost);
+        self.money_hook = armed(self.scan.money_balance, options.infinite_money);
         // Shiny and perfect stats hook where a Pokémon is built; perfect
         // stats for wild Pokémon also watches `CreateWildMon`.
-        self.make_shiny = self.cheat_options.shiny;
-        self.shiny_one_in = self.cheat_options.shiny_odds.one_in();
-        self.perfect_wild = self.cheat_options.perfect_for_wild();
-        self.perfect_opponents = self.cheat_options.perfect_for_opponents();
+        self.make_shiny = options.shiny;
+        self.shiny_one_in = options.shiny_odds.one_in();
+        self.perfect_wild = options.perfect_for_wild();
+        self.perfect_opponents = options.perfect_for_opponents();
         let building = self.make_shiny || self.perfect_wild || self.perfect_opponents;
-        self.build_hook = match self.shiny_point {
-            Some(address) if building => address,
-            _ => NO_HOOK,
-        };
-        self.wild_scope_hook = match self.create_wild_mon {
-            Some(entry) if self.perfect_wild && self.build_hook != NO_HOOK => entry,
-            _ => NO_HOOK,
-        };
+        self.build_hook = armed(self.scan.shiny_point, building);
+        self.wild_scope_hook = armed(
+            self.scan.create_wild_mon,
+            self.perfect_wild && self.build_hook != NO_HOOK,
+        );
         self.wild_return = NO_HOOK;
         self.wild_species_hook = NO_HOOK;
         self.wild_species = NO_VALUE;
         self.wild_level = NO_VALUE;
-        if let Some(entry) = self.create_wild_mon {
+        if let Some(entry) = self.scan.create_wild_mon {
             let species = self.cheat_options.active_wild_species();
             let level = self.cheat_options.active_wild_level();
             if species.is_some() || level.is_some() {
@@ -629,18 +600,7 @@ impl Emulator {
 
     /// The hook addresses found in this ROM, for the settings file.
     pub fn cheat_scan(&self) -> CheatScan {
-        CheatScan {
-            rom: crate::cheats::scan::RomFingerprint::of(&self.memory.rom),
-            create_wild_mon: self.create_wild_mon,
-            catch_check: self.catch_check,
-            shiny_point: self.shiny_point,
-            money_balance: self.money_balance,
-            exp_traded: self.exp_traded,
-            encounter_roll: self.encounter_roll,
-            tm_uses: self.tm_uses.clone(),
-            field_moves: self.field_moves,
-            party_menu: self.party_menu,
-        }
+        self.scan.clone()
     }
 
     pub fn cheat_options(&self) -> CheatOptions {
@@ -650,22 +610,22 @@ impl Emulator {
     /// Where the wild-species override hooks (`CreateWildMon`'s entry), if
     /// the ROM is recognised.
     pub fn wild_species_hook_address(&self) -> Option<u32> {
-        self.create_wild_mon
+        self.scan.create_wild_mon
     }
 
     /// Where the 100% catch rate cheat hooks, if the ROM is recognised.
     pub fn catch_check_address(&self) -> Option<u32> {
-        self.catch_check
+        self.scan.catch_check
     }
 
     /// Where the shiny and perfect-stats cheats hook, if the ROM is recognised.
     pub fn build_hook_address(&self) -> Option<u32> {
-        self.shiny_point
+        self.scan.shiny_point
     }
 
     /// Whether the wild-species override can work with this ROM.
     pub fn wild_species_supported(&self) -> bool {
-        self.create_wild_mon.is_some()
+        self.scan.create_wild_mon.is_some()
     }
 
     pub fn cheats(&self) -> &Cheats {
@@ -681,5 +641,7 @@ impl Emulator {
     }
 }
 
+#[cfg(test)]
+mod cheat_tests;
 #[cfg(test)]
 mod tests;

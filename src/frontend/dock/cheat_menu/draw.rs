@@ -1,19 +1,17 @@
 //! Painting the cheat menu.
 
 use super::{
-    CheatMenu, FocusRow, LIST_ENTRIES, LIST_ROW_HEIGHT, LIST_VISIBLE_ROWS, MenuLayout, WildPart,
+    ALWAYS_ON, CheatMenu, FocusRow, LIST_ENTRIES, LIST_ROW_HEIGHT, LIST_VISIBLE_ROWS, MenuLayout,
+    WildPart,
 };
 use crate::frontend::dock::draw::{DOCK_COLOR, FILL_COLOR, ICON_COLOR, TRACK_COLOR};
 use crate::frontend::draw::{Canvas, GLYPH_HEIGHT, Rect, TEXT_SCALE, text_width};
-use gba_emulator::cheats::options::{CheatOption, CheatOptions, PerfectTarget};
+use gba_emulator::cheats::options::PerfectTarget;
 use gba_emulator::cheats::species;
 
-/// Colour of the SOON tag on options that do not change the game yet.
-const SOON_COLOR: u32 = 0x008A_9299;
 /// Text of a row that is switched off (its choices stay visible).
 const OFF_COLOR: u32 = 0x00B4_BBC2;
-/// Colour of the ALWAYS ON tag (distinct from the SOON tag, which the menu's
-/// tests count).
+/// Colour of the ALWAYS ON tag.
 const ALWAYS_ON_COLOR: u32 = 0x007F_B89A;
 /// The tag of a cheat that is always on (it has no switch).
 pub(super) const ALWAYS_ON_TAG: &str = "ALWAYS ON";
@@ -96,17 +94,6 @@ impl CheatMenu {
             );
         }
         let right = layout.panel.x + layout.panel.width - PADDING;
-        let soon = |canvas: &mut Canvas, option: CheatOption, centre_y: i32| {
-            if !CheatOptions::is_live(option) {
-                canvas.text(
-                    "SOON",
-                    right - text_width("SOON"),
-                    centre_y - TEXT_HEIGHT / 2,
-                    SOON_COLOR,
-                );
-            }
-        };
-
         let options = self.options();
         // A row that is switched off keeps its choices on show, dimmed.
         let tone = |on: bool| if on { ICON_COLOR } else { OFF_COLOR };
@@ -186,22 +173,14 @@ impl CheatMenu {
             centre(layout.perfect_dropdown),
             perfect_tone,
         );
-        soon(
-            canvas,
-            CheatOption::PerfectStats,
-            layout.perfect_label.1 + TEXT_HEIGHT / 2,
-        );
 
         // Money, catch rate, experience, shiny, then no encounters at the bottom.
         checkbox(canvas, layout.money, options.infinite_money);
         checkbox_label(canvas, layout.money, "INFINITE MONEY");
-        soon(canvas, CheatOption::InfiniteMoney, centre(layout.money));
         checkbox(canvas, layout.catch, options.catch_always);
         checkbox_label(canvas, layout.catch, "100% CATCH RATE");
-        soon(canvas, CheatOption::CatchAlways, centre(layout.catch));
         checkbox(canvas, layout.exp_boost, options.exp_boost);
         checkbox_label(canvas, layout.exp_boost, "ALL EXPERIENCE IS BOOSTED");
-        soon(canvas, CheatOption::ExpBoost, centre(layout.exp_boost));
         let shiny_tone = tone(options.shiny);
         checkbox(canvas, layout.shiny, options.shiny);
         canvas.text(
@@ -220,19 +199,10 @@ impl CheatMenu {
             centre(layout.shiny_value) - TEXT_HEIGHT / 2,
             shiny_tone,
         );
-        soon(canvas, CheatOption::Shiny, centre(layout.shiny));
         checkbox(canvas, layout.no_encounters, options.no_encounters);
         checkbox_label(canvas, layout.no_encounters, "NO RANDOM ENCOUNTERS");
-        soon(
-            canvas,
-            CheatOption::NoEncounters,
-            centre(layout.no_encounters),
-        );
         // Always on: ticked, dimmed, tagged, and not a control.
-        for (rect, label) in [
-            (layout.always_on, "TMS ARE INFINITELY USABLE"),
-            (layout.always_on_hms, "FIRST POKEMON KNOWS EVERY HM"),
-        ] {
+        for (rect, label) in layout.always_on.into_iter().zip(ALWAYS_ON) {
             canvas.rounded_rect(rect, 6, TRACK_COLOR, 0.8);
             for (dx, dy) in CHECK_MARK {
                 canvas.rect(rect.x + dx - 1, rect.y + dy - 4, 3, 3, OFF_COLOR);

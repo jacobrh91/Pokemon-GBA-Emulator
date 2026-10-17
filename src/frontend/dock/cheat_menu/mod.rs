@@ -14,6 +14,7 @@
 //! | no random encounters | |
 //! | TMs are infinitely usable | none: always on, shown ticked |
 //! | the first Pokémon knows every HM | none: always on, shown ticked |
+//! | no poison damage outside battle | none: always on, shown ticked |
 //!
 //! Choosing a species, level, target or chance also switches its row on;
 //! unticking a row keeps its choices.
@@ -146,6 +147,16 @@ impl Hold {
 }
 
 pub(super) const PANEL_WIDTH: i32 = 820;
+/// The cheats that are always on: they have no switch, so the menu lists them
+/// last, ticked and tagged. Infinite TMs, the first Pokémon knowing every HM,
+/// and no poison damage outside battle.
+pub(super) const ALWAYS_ON: [&str; 3] = [
+    "TMS ARE INFINITELY USABLE",
+    "FIRST POKEMON KNOWS EVERY HM",
+    "NO POISON DAMAGE OUTSIDE BATTLE",
+];
+/// Distance between the always-on rows.
+const ALWAYS_ON_PITCH: i32 = 34;
 /// Space the row checkbox takes before a row's own controls.
 const LEAD: i32 = 36;
 const PADDING: i32 = 24;
@@ -188,10 +199,9 @@ pub(super) struct MenuLayout {
     pub(super) shiny_value: Rect,
     pub(super) shiny_plus: Rect,
     pub(super) no_encounters: Rect,
-    /// The cheats that are always on, so their boxes are only shown: infinite
-    /// TMs, then the first Pokémon knowing every HM (last in the list).
-    pub(super) always_on: Rect,
-    pub(super) always_on_hms: Rect,
+    /// The boxes of the always-on rows (last in the list), which are only
+    /// shown: see [`ALWAYS_ON`].
+    pub(super) always_on: [Rect; ALWAYS_ON.len()],
     /// The open species list, below the dropdown.
     pub(super) list: Rect,
 }
@@ -202,7 +212,7 @@ impl MenuLayout {
     pub(super) fn new(width: usize, dock: Rect, file_row: bool) -> Self {
         // The optional file row pushes every other row down by one.
         let extra = if file_row { 44 } else { 0 };
-        let panel_height = 476 + extra;
+        let panel_height = 496 + extra;
         let x = (dock.x + dock.width - PANEL_WIDTH)
             .min(width as i32 - PANEL_WIDTH - 12)
             .max(12);
@@ -231,8 +241,8 @@ impl MenuLayout {
         let row_exp = y + 258 + extra;
         let row_shiny = y + 302 + extra;
         let row_no_encounters = y + 346 + extra;
-        let row_always_on = y + 390 + extra;
-        let row_always_on_hms = y + 434 + extra;
+        // The always-on rows are only shown, so they sit closer together.
+        let row_always_on = |index: usize| y + 390 + extra + ALWAYS_ON_PITCH * index as i32;
 
         // Rows with controls of their own start after their checkbox.
         let wild_label = (left + LEAD, row_wild - text_h / 2);
@@ -327,8 +337,7 @@ impl MenuLayout {
             shiny_value,
             shiny_plus,
             no_encounters: checkbox_at(left, row_no_encounters),
-            always_on: checkbox_at(left, row_always_on),
-            always_on_hms: checkbox_at(left, row_always_on_hms),
+            always_on: std::array::from_fn(|index| checkbox_at(left, row_always_on(index))),
             list: Rect {
                 x: dropdown.x,
                 y: dropdown.y + dropdown.height + 4,

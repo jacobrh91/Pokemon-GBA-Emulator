@@ -46,7 +46,7 @@
 //! Emerald builds), it is read from the game: the script command that checks
 //! the party, `checkpartymove`, computes `&gPlayerParty[i]` from a constant it
 //! loads from the ROM's literal pool, and that load is found by its
-//! surrounding bytes ([`PARTY_LOAD`]) and decoded.
+//! surrounding bytes (`PARTY_LOAD`) and decoded.
 
 use super::{ROM_BASE, Signature};
 
@@ -163,9 +163,6 @@ pub struct FieldMoves {
 /// Waterfall, Flash, Rock Smash and Dive.
 pub const HM_MOVES: [u16; 8] = [15, 19, 57, 70, 127, 148, 249, 291];
 
-/// Size of one party member in memory.
-const PARTY_MEMBER_SIZE: u32 = 100;
-
 /// The cheat's locations in `rom`, if it is a recognised game in which both
 /// are found.
 pub fn find(rom: &[u8]) -> Option<FieldMoves> {
@@ -201,13 +198,6 @@ fn pc_relative_load_value(rom: &[u8], at: u32) -> Option<u32> {
 /// is an HM.
 pub fn acts_as_known(mon: u32, move_id: u32, party_base: u32) -> bool {
     mon == party_base && HM_MOVES.iter().any(|hm| u32::from(*hm) == move_id)
-}
-
-/// The slot of the party that `mon` is, if it is one of the six.
-pub fn party_slot(mon: u32, party_base: u32) -> Option<u32> {
-    let distance = mon.checked_sub(party_base)?;
-    (distance % PARTY_MEMBER_SIZE == 0 && distance / PARTY_MEMBER_SIZE < 6)
-        .then_some(distance / PARTY_MEMBER_SIZE)
 }
 
 #[cfg(test)]
@@ -275,16 +265,6 @@ mod tests {
     fn the_hms_are_the_eight_field_moves() {
         // Cut, Fly, Surf, Strength, Waterfall, Flash, Rock Smash, Dive.
         assert_eq!(HM_MOVES, [15, 19, 57, 70, 127, 148, 249, 291]);
-    }
-
-    #[test]
-    fn slots_are_one_hundred_bytes_apart_and_there_are_six() {
-        let base = 0x0202_4284;
-        assert_eq!(party_slot(base, base), Some(0));
-        assert_eq!(party_slot(base + 500, base), Some(5));
-        assert_eq!(party_slot(base + 600, base), None);
-        assert_eq!(party_slot(base + 50, base), None);
-        assert_eq!(party_slot(base - 100, base), None);
     }
 
     #[test]

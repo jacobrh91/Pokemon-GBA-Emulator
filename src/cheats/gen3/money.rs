@@ -30,7 +30,7 @@
 //! These bytes also occur twice elsewhere in the ROM, so they cannot identify
 //! the function. `IsEnoughMoney` can: its bytes are unique and it begins by
 //! calling `GetMoney`. The scan finds `IsEnoughMoney` (see
-//! [`IS_ENOUGH_SIGNATURE`]), decodes the target of its `BL`, checks that the
+//! `IS_ENOUGH_SIGNATURE`), decodes the target of its `BL`, checks that the
 //! target's bytes are the ones above, and hooks the `bx lr` 16 bytes in.
 
 use super::{ROM_BASE, Signature};

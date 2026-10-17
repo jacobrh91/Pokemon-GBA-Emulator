@@ -121,35 +121,7 @@ pub struct CheatOptions {
     pub file_codes: bool,
 }
 
-/// One entry of the menu, for asking which options are live.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheatOption {
-    Shiny,
-    WildSpecies,
-    WildLevel,
-    PerfectStats,
-    InfiniteMoney,
-    CatchAlways,
-    ExpBoost,
-    NoEncounters,
-}
-
 impl CheatOptions {
-    /// True when the option changes the game.
-    pub fn is_live(option: CheatOption) -> bool {
-        matches!(
-            option,
-            CheatOption::WildSpecies
-                | CheatOption::WildLevel
-                | CheatOption::CatchAlways
-                | CheatOption::Shiny
-                | CheatOption::PerfectStats
-                | CheatOption::InfiniteMoney
-                | CheatOption::ExpBoost
-                | CheatOption::NoEncounters
-        )
-    }
-
     /// The wild-encounter species the game should be given, if the row is on.
     pub fn active_wild_species(&self) -> Option<u16> {
         self.wild_enabled.then_some(self.wild_species).flatten()
@@ -194,37 +166,6 @@ mod tests {
             ..CheatOptions::default()
         };
         assert!(!one.is_default());
-    }
-
-    #[test]
-    fn every_option_is_live() {
-        use CheatOption::*;
-        let live: Vec<_> = [
-            Shiny,
-            WildSpecies,
-            WildLevel,
-            PerfectStats,
-            InfiniteMoney,
-            CatchAlways,
-            ExpBoost,
-            NoEncounters,
-        ]
-        .into_iter()
-        .filter(|option| CheatOptions::is_live(*option))
-        .collect();
-        assert_eq!(
-            live,
-            [
-                Shiny,
-                WildSpecies,
-                WildLevel,
-                PerfectStats,
-                InfiniteMoney,
-                CatchAlways,
-                ExpBoost,
-                NoEncounters
-            ]
-        );
     }
 
     #[test]
