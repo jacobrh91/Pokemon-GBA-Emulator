@@ -394,6 +394,24 @@ frame boundary or before every instruction. They are accepted and applied as
 written (so codes that do work are unaffected), but use `wild_species` for this
 effect.
 
+## Real-time clock
+
+Pokémon Ruby, Sapphire and Emerald keep time with a clock chip on the cartridge
+(an Seiko S-3511A on its GPIO port, at ROM offsets `0xC4..=0xC9`), which the
+emulator provides, showing **the clock of the machine it runs on**, in its time
+zone. Without it those games say "The internal battery has run dry. The game can
+be played. However, clock-based events will no longer occur." when they start.
+The clock is found by the game code in the cartridge header (`AXV?`, `AXP?`,
+`BPE?`); other games are unaffected, and their ROM shows at those offsets as
+before. The chip reports 24-hour mode and never the power-failure flag; the date
+and time cannot be set by the game (a game that tries is ignored), they are
+always the machine's. The port is not part of a save state (a state keeps the
+game's own record of the time, which the game compares with the clock after a
+load, as it does on hardware). See `src/mmu/rtc.rs`.
+
+Checked with the Emerald (USA, Europe) ROM: without the clock the main menu shows
+the battery message; with it, it does not.
+
 ## Save states
 
 Press `0` to save the whole console to a state file beside the ROM
@@ -474,7 +492,8 @@ desktop frontend is the binary.
 ```text
 src/
   cpu/         ARM7TDMI interpreter (ARM and Thumb), cycle accounting, HLE BIOS
-  mmu/         Memory bus: regions, wait states, timers, interrupts, display
+  mmu/         Memory bus: regions, wait states, timers, interrupts, display,
+               and the real-time clock of Ruby / Sapphire / Emerald (`rtc.rs`)
                timing, DMA, Flash/SRAM saves, and the I/O register offsets (registers.rs)
   ppu/         Scanline renderer: backgrounds (text, affine, bitmap), sprites,
                windows, blending, mosaic

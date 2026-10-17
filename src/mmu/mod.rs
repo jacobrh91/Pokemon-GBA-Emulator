@@ -6,6 +6,8 @@ use std::io;
 mod display;
 mod dma;
 mod interrupts;
+mod rtc;
+use rtc::Rtc;
 pub mod registers;
 mod save;
 mod state;
@@ -72,6 +74,9 @@ pub struct MemoryBus {
     pub vram: Box<[u8; 96 * 1024]>,
     pub oam: Box<[u8; 1024]>,
     savedata: Savedata,
+    /// The cartridge's real-time clock, for the games that have one (see
+    /// [`rtc`]); `None` for the rest.
+    rtc: Option<Rtc>,
     /// Currently pressed buttons (`input` bit layout, 1 = pressed).
     pressed_buttons: u16,
     keypad_irq_active: bool,
@@ -123,6 +128,10 @@ impl MemoryBus {
         io_regs[SOUNDBIAS + 1] = SOUNDBIAS_DEFAULT_HIGH;
 
         let savedata = Savedata::detect(&rom);
+        let rtc = rom
+            .get(0xAC..0xB0)
+            .filter(|code| rtc::cartridge_has_clock(code))
+            .map(|_| Rtc::new(rtc::host_time));
         let rom_mask = if rom.len().is_power_of_two() {
             rom.len() - 1
         } else {
@@ -135,6 +144,7 @@ impl MemoryBus {
             iwram: Box::new([0; 32 * 1024]),
             io_regs,
             savedata,
+            rtc,
             palette_ram: Box::new([0; 1024]),
             vram: Box::new([0; 96 * 1024]),
             oam: Box::new([0; 1024]),
@@ -160,9 +170,54 @@ impl MemoryBus {
         })
     }
 
+    /// Whether the byte at cartridge `offset` is one the clock's port shows
+    /// instead of the ROM's own.
+    #[inline]
+    fn clock_port_at(&self, offset: usize) -> bool {
+        self.rtc
+            .as_ref()
+            .is_some_and(|rtc| rtc.readable() && Rtc::is_gpio(offset))
+    }
+
+    /// Whether any of the `length` bytes of `region` from its offset are.
+    #[inline]
+    fn clock_port_in(&self, region: Region, length: usize) -> bool {
+        match region {
+            Region::Rom(offset) => {
+                self.rtc.is_some() && (offset..offset + length).any(|at| self.clock_port_at(at))
+            }
+            _ => false,
+        }
+    }
+
+    /// A write into the cartridge's address space: the ROM ignores it, but the
+    /// clock's port takes it.
+    fn write_cartridge(&mut self, address: u32, bytes: &[u8]) {
+        let Some(rtc) = &mut self.rtc else {
+            return;
+        };
+        let offset = (address & 0x01FF_FFFF) as usize;
+        for (index, byte) in bytes.iter().enumerate() {
+            if Rtc::is_gpio(offset + index) {
+                rtc.write(offset + index, *byte);
+            }
+        }
+    }
+
+    /// Replaces the clock the cartridge's real-time clock reads (tests).
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, clock: rtc::Clock) {
+        if self.rtc.is_some() {
+            self.rtc = Some(Rtc::new(clock));
+        }
+    }
+
     pub fn read_u8(&self, address: u32) -> io::Result<u8> {
         match self.resolve(address)? {
             // Past the end of the cartridge the address bus echoes itself.
+            Region::Rom(offset) if self.clock_port_at(offset) => {
+                Ok(self.rtc.as_ref().map_or(0, |rtc| rtc.read(offset)))
+            }
             Region::Rom(offset) => Ok(self.rom.get(offset).copied().unwrap_or_else(|| {
                 let halfword = (address >> 1) as u16;
                 halfword.to_le_bytes()[(address & 1) as usize]
@@ -261,7 +316,9 @@ impl MemoryBus {
 
     pub fn read_u16(&self, address: u32) -> io::Result<u16> {
         let region = self.resolve(address)?;
-        if let Some(bytes) = self.plain_bytes(region, 2) {
+        if !self.clock_port_in(region, 2)
+            && let Some(bytes) = self.plain_bytes(region, 2)
+        {
             return Ok(u16::from_le_bytes([bytes[0], bytes[1]]));
         }
         // The backup chip sits on an 8-bit bus: wider reads see the byte
@@ -282,7 +339,9 @@ impl MemoryBus {
 
     pub fn read_u32(&self, address: u32) -> io::Result<u32> {
         let region = self.resolve(address)?;
-        if let Some(bytes) = self.plain_bytes(region, 4) {
+        if !self.clock_port_in(region, 4)
+            && let Some(bytes) = self.plain_bytes(region, 4)
+        {
             return Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
         }
         if matches!(region, Region::SaveRam(_)) {
@@ -304,6 +363,7 @@ impl MemoryBus {
     pub fn write_u8(&mut self, address: u32, value: u8) -> io::Result<()> {
         self.write_count += 1;
         if (ROM_START..=ROM_END).contains(&address) {
+            self.write_cartridge(address, &[value]);
             return Ok(());
         }
         let region = self.resolve(address)?;
@@ -313,6 +373,7 @@ impl MemoryBus {
     pub fn write_u16(&mut self, address: u32, value: u16) -> io::Result<()> {
         self.write_count += 1;
         if (ROM_START..=ROM_END).contains(&address) {
+            self.write_cartridge(address, &value.to_le_bytes());
             return Ok(());
         }
         let first = self.resolve(address)?;
@@ -500,6 +561,7 @@ impl MemoryBus {
     pub fn write_u32(&mut self, address: u32, value: u32) -> io::Result<()> {
         self.write_count += 1;
         if (ROM_START..=ROM_END).contains(&address) {
+            self.write_cartridge(address, &value.to_le_bytes());
             return Ok(());
         }
         let first = self.resolve(address)?;

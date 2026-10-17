@@ -285,6 +285,7 @@ name = "gba_emulator"
 version = "0.1.0"
 dependencies = [
  "cpal",
+ "libc",
  "memmap2",
  "minifb",
 ]

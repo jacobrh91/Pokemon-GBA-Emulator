@@ -705,3 +705,116 @@ fn restoring_a_state_marks_backup_memory_changed() {
         "the battery save file must follow the restored contents"
     );
 }
+
+// ---- the cartridge's real-time clock --------------------------------------
+
+use super::rtc::LocalTime;
+
+fn clock_at_noon() -> LocalTime {
+    LocalTime {
+        year: 2031,
+        month: 1,
+        day: 2,
+        weekday: 3,
+        hour: 12,
+        minute: 34,
+        second: 56,
+    }
+}
+
+/// A bus for a cartridge with the given game code and the fixed clock above.
+fn bus_with_clock(game_code: &[u8; 4]) -> MemoryBus {
+    let mut rom = vec![0xEEu8; 0x200];
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    let mut bus = bus_with_rom(&rom);
+    bus.set_clock(clock_at_noon);
+    bus
+}
+
+const GPIO_DATA: u32 = ROM_START + 0xC4;
+const GPIO_DIRECTION: u32 = ROM_START + 0xC6;
+const GPIO_CONTROL: u32 = ROM_START + 0xC8;
+
+/// Reads `length` bytes of the clock's register `register` the way the games do,
+/// through the bus: 16-bit accesses to the GPIO port.
+fn read_clock_register(bus: &mut MemoryBus, register: u8, length: usize) -> Vec<u8> {
+    bus.write_u16(GPIO_CONTROL, 1).unwrap();
+    bus.write_u16(GPIO_DIRECTION, 0b111).unwrap();
+    bus.write_u16(GPIO_DATA, 0b001).unwrap();
+    bus.write_u16(GPIO_DATA, 0b101).unwrap();
+    let command = 0x60 | (register << 1) | 1;
+    for index in (0..8).rev() {
+        let sio = u16::from((command >> index) & 1) << 1;
+        bus.write_u16(GPIO_DATA, sio | 4).unwrap();
+        bus.write_u16(GPIO_DATA, sio | 5).unwrap();
+    }
+    bus.write_u16(GPIO_DIRECTION, 0b101).unwrap();
+    let mut bytes = Vec::new();
+    for _ in 0..length {
+        let mut byte = 0u8;
+        for index in 0..8 {
+            bus.write_u16(GPIO_DATA, 4).unwrap();
+            bus.write_u16(GPIO_DATA, 5).unwrap();
+            byte |= (((bus.read_u16(GPIO_DATA).unwrap() >> 1) & 1) as u8) << index;
+        }
+        bytes.push(byte);
+    }
+    bus.write_u16(GPIO_DIRECTION, 0b111).unwrap();
+    bus.write_u16(GPIO_DATA, 0b001).unwrap();
+    bytes
+}
+
+#[test]
+fn emerald_ruby_and_sapphire_read_the_clock_through_the_cartridge_port() {
+    for code in [b"BPEE", b"AXVE", b"AXPE"] {
+        let mut bus = bus_with_clock(code);
+        assert_eq!(
+            read_clock_register(&mut bus, 2, 7),
+            [0x31, 0x01, 0x02, 0x03, 0x12, 0x34, 0x56],
+            "{code:?}"
+        );
+        // The status shows 24-hour mode and no power failure.
+        assert_eq!(read_clock_register(&mut bus, 1, 1)[0] & 0xC0, 0x40);
+    }
+}
+
+#[test]
+fn other_cartridges_have_no_clock_and_their_rom_is_untouched() {
+    let mut bus = bus_with_clock(b"BPRE");
+    bus.write_u16(GPIO_CONTROL, 1).unwrap();
+    bus.write_u16(GPIO_DATA, 0b111).unwrap();
+    assert_eq!(
+        bus.read_u16(GPIO_DATA).unwrap(),
+        0xEEEE,
+        "the ROM's own bytes"
+    );
+    assert_eq!(bus.read_u8(GPIO_CONTROL).unwrap(), 0xEE);
+}
+
+#[test]
+fn the_port_overlays_the_rom_only_at_its_own_bytes_in_every_width_and_mirror() {
+    let mut bus = bus_with_clock(b"BPEE");
+    bus.write_u16(GPIO_CONTROL, 1).unwrap();
+    bus.write_u16(GPIO_DIRECTION, 0b111).unwrap();
+    // A neighbour is the ROM's: reads straddling the port see both.
+    assert_eq!(bus.read_u8(ROM_START + 0xC3).unwrap(), 0xEE);
+    assert_eq!(bus.read_u8(ROM_START + 0xCA).unwrap(), 0xEE);
+    assert_eq!(
+        bus.read_u16(GPIO_DIRECTION).unwrap(),
+        0b111,
+        "direction, then a zero byte"
+    );
+    assert_eq!(bus.read_u32(GPIO_DATA).unwrap() & 0xFFFF_0000, 0b111 << 16);
+    // The same offsets in the other Game Pak windows reach the same port.
+    assert_eq!(bus.read_u16(0x0A00_00C6).unwrap(), 0b111);
+    assert_eq!(bus.read_u16(0x0C00_00C6).unwrap(), 0b111);
+    // Writing a byte or a word reaches the registers too.
+    bus.write_u8(GPIO_DIRECTION, 0b101).unwrap();
+    assert_eq!(bus.read_u8(GPIO_DIRECTION).unwrap(), 0b101);
+    bus.write_u32(GPIO_DATA, 0x0007_0000 | 0b101).unwrap();
+    assert_eq!(
+        bus.read_u16(GPIO_DIRECTION).unwrap(),
+        0b111,
+        "the word's high half"
+    );
+}
