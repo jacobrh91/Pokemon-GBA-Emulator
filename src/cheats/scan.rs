@@ -1,13 +1,19 @@
 //! The result of the first pass through a ROM: where each built-in cheat
-//! hooks (see [`super::firered`]), remembered in the per-game settings file
+//! hooks (see [`super::gen3`]), remembered in the per-game settings file
 //! so later launches skip the scan.
 //!
-//! The result is only trusted for the exact ROM it was found in, which a
-//! fingerprint (length and a 64-bit FNV-1a hash of every byte) tells apart.
-//! "Not found" is remembered too, so a ROM that is not FireRed is not scanned
-//! again either.
+//! The result is only trusted for the exact ROM it was found in, told apart
+//! by a fingerprint (length and a 64-bit FNV-1a hash). "Not found" is
+//! remembered too.
 
-use super::firered::{catch_rate, encounters, experience, money, shiny, tm, wild_species};
+use super::gen3::field_moves::{self, FieldMoves};
+use super::gen3::{catch_rate, encounters, experience, money, shiny, tm, wild_species};
+
+/// The version of the rules a scan follows. Results cached in a settings file
+/// are only trusted when they were made under the same version: bump this
+/// whenever what the scans accept changes (a new game recognised, a signature
+/// changed), so that "not found" answers from the old rules are not believed.
+pub const SCAN_VERSION: u32 = 4;
 
 /// Identifies a ROM image: `<length>-<hash>`, both in hex.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,9 +57,12 @@ pub struct CheatScan {
     pub exp_traded: Option<u32>,
     /// The end of the wild-encounter dice roll (see [`encounters`]).
     pub encounter_roll: Option<u32>,
-    /// The two calls that take a TM out of the bag (see [`tm`]).
-    pub tm_use_a: Option<u32>,
-    pub tm_use_b: Option<u32>,
+    /// The calls that take a TM out of the bag (see [`tm`]); empty when none
+    /// was found.
+    pub tm_uses: Vec<u32>,
+    /// Where the first party Pokémon is made to know the HMs (see
+    /// [`field_moves`]).
+    pub field_moves: Option<FieldMoves>,
 }
 
 impl CheatScan {
@@ -67,8 +76,8 @@ impl CheatScan {
             money_balance: money::find(rom),
             exp_traded: experience::find(rom),
             encounter_roll: encounters::find(rom),
-            tm_use_a: tm::find(rom).map(|sites| sites[0]),
-            tm_use_b: tm::find(rom).map(|sites| sites[1]),
+            tm_uses: tm::find(rom),
+            field_moves: field_moves::find(rom),
         }
     }
 
@@ -108,8 +117,8 @@ mod tests {
             money_balance: None,
             exp_traded: None,
             encounter_roll: None,
-            tm_use_a: None,
-            tm_use_b: None,
+            tm_uses: Vec::new(),
+            field_moves: None,
         };
         assert_eq!(CheatScan::for_rom(&rom, Some(&recorded)), recorded);
         let mut other = rom.clone();

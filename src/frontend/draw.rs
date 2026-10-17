@@ -47,13 +47,9 @@ impl<'a> Canvas<'a> {
     }
 }
 
-// The pixel primitives are kept out of line on purpose. With fat LTO they get
-// inlined into `frontend::run` with the 960-pixel width known at compile time,
-// and rustc 1.92's arm64 backend then miscompiled `y * 960` (once as an
-// invalid instruction, once by subtracting the colour register instead of `y`,
-// which wrote the pixel far outside the buffer and crashed at launch). With a
-// runtime width the multiply is an ordinary `mul`. `scripts/check_codegen.sh`
-// runs the release build to catch a recurrence.
+// Kept out of line on purpose: inlined into `frontend::run` with the width
+// known at compile time, rustc 1.92's arm64 backend miscompiled `y * 960` and
+// crashed at launch. `scripts/check_codegen.sh` catches a recurrence.
 impl Canvas<'_> {
     #[inline(never)]
     pub(crate) fn blend(&mut self, x: i32, y: i32, color: u32, alpha: f32) {

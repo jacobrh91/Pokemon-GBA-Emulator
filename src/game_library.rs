@@ -9,8 +9,7 @@
 //!       <My Pokemon ROM>.sav
 //! ```
 //!
-//! Installing never touches an existing `saves/` directory, so reinstalling or
-//! replacing a ROM cannot lose progress.
+//! Installing never touches an existing `saves/` directory.
 
 use std::ffi::OsStr;
 use std::fs;

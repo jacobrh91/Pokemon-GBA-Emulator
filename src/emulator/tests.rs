@@ -788,7 +788,12 @@ fn wild_mon_rom(game_code: &[u8; 4], function: usize) -> std::path::PathBuf {
     put(0xCC, 0xE12F_FF12); // bx  r2
     put(0xD4, 0x0800_0000 + function as u32 + 1); // Thumb entry
     rom[0xAC..0xB0].copy_from_slice(game_code);
-    rom[function..function + 16].copy_from_slice(&crate::cheats::firered::wild_species::SIGNATURE);
+    let prologue: Vec<u8> = crate::cheats::gen3::wild_species::SIGNATURE
+        .bytes
+        .iter()
+        .map(|byte| byte.unwrap())
+        .collect();
+    rom[function..function + 16].copy_from_slice(&prologue);
     rom[function + 16..function + 18].copy_from_slice(&0xE7FEu16.to_le_bytes()); // b .
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -914,7 +919,7 @@ fn the_function_is_found_wherever_the_build_put_it() {
 }
 
 #[test]
-fn the_wild_row_only_applies_to_firered_roms_and_clamps_the_level() {
+fn the_wild_row_only_applies_to_gen3_roms_and_clamps_the_level() {
     let (species, level, supported, hook) =
         wild_run(b"AXVE", 0x8_29FC, wild(Some(25), Some(50)), "");
     assert!(!supported);
@@ -1027,7 +1032,7 @@ fn the_catch_cheat_is_off_until_its_row_is_on_and_leaves_other_games_alone() {
 /// comparison decides. An ARM stub calls it with `r0 = rate`; the answer is
 /// in `r0` once the Thumb code reaches the `b .` it returns to.
 fn encounter_rom(game_code: &[u8; 4], function: usize, rate: u32, roll: u8) -> std::path::PathBuf {
-    use crate::cheats::firered::encounters::SIGNATURE;
+    use crate::cheats::gen3::encounters::SIGNATURE;
     let mut rom = vec![0u8; 0x8_3000];
     let mut put = |offset: usize, word: u32| {
         rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
@@ -1041,7 +1046,7 @@ fn encounter_rom(game_code: &[u8; 4], function: usize, rate: u32, roll: u8) -> s
     put(0xD8, 0x0800_0000 + spin as u32 + 1); // return address (Thumb)
     put(0xDC, 0x0800_0000 + function as u32 + 1); // Thumb entry
     rom[0xAC..0xB0].copy_from_slice(game_code);
-    for (index, byte) in SIGNATURE.iter().enumerate() {
+    for (index, byte) in SIGNATURE.bytes.iter().enumerate() {
         rom[function + index] = byte.unwrap_or(0);
     }
     let mut put16 = |offset: usize, half: u16| {
@@ -1115,7 +1120,7 @@ fn the_encounter_cheat_is_off_until_its_row_is_on_and_leaves_other_games_alone()
 /// have been given). An ARM stub enters the first, and the second, with
 /// `r1 = 200` (a TM); `r2` ends up as the count.
 fn tm_rom(game_code: &[u8; 4], function: usize, entry: usize) -> std::path::PathBuf {
-    use crate::cheats::firered::tm::SIGNATURE;
+    use crate::cheats::gen3::tm::SIGNATURE;
     let mut rom = vec![0u8; 0x8_3000];
     let mut put = |offset: usize, word: u32| {
         rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
@@ -1127,7 +1132,7 @@ fn tm_rom(game_code: &[u8; 4], function: usize, entry: usize) -> std::path::Path
     put(0xCC, 0xE12F_FF13); // bx  r3
     put(0xD4, 0x0800_0000 + (function + entry) as u32 + 1); // Thumb entry
     rom[0xAC..0xB0].copy_from_slice(game_code);
-    for (index, byte) in SIGNATURE.iter().enumerate() {
+    for (index, byte) in SIGNATURE.bytes.iter().enumerate() {
         rom[function + index] = byte.unwrap_or(0);
     }
     let mut put16 = |offset: usize, half: u16| {
@@ -1138,7 +1143,7 @@ fn tm_rom(game_code: &[u8; 4], function: usize, entry: usize) -> std::path::Path
     put16(function + 20, 0xE7FE); // b .
     // A second copy elsewhere: the hook must cover both.
     let second = function + 0x100;
-    for index in 0..SIGNATURE.len() + 2 {
+    for index in 0..SIGNATURE.bytes.len() + 2 {
         rom[second + index] = rom[function + index];
     }
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1161,10 +1166,7 @@ fn tm_count(game_code: &[u8; 4], entry: usize, options: CheatOptions) -> (u32, b
         emulator.step().unwrap();
     }
     let scan = emulator.cheat_scan();
-    (
-        emulator.cpu().registers[2],
-        scan.tm_use_a.is_some() && scan.tm_use_b.is_some(),
-    )
+    (emulator.cpu().registers[2], scan.tm_uses.len() == 2)
 }
 
 #[test]
@@ -1192,4 +1194,97 @@ fn other_games_still_use_up_their_items() {
         assert!(!found);
         assert_eq!(count, 1, "the game's own call is untouched");
     }
+}
+
+/// A ROM with `MonKnowsMove` (its real bytes, the call to `GetMonData`
+/// replaced by `movs r0, #0 ; nop` so that the game's own answer is always
+/// "does not know") and `checkpartymove`'s party load, whose pool holds
+/// `0x02024284`. An ARM stub calls the function with `r0 = mon` and `r1 =
+/// move`; the answer is `r0` once the Thumb code reaches the `b .` it returns
+/// to.
+fn knows_move_rom(game_code: &[u8; 4], mon: u32, move_id: u32) -> std::path::PathBuf {
+    use crate::cheats::gen3::field_moves::{MON_KNOWS_MOVE, PARTY_LOAD};
+    let mut rom = vec![0u8; 0x8_3000];
+    let function = 0x8_2000;
+    let load = 0x8_2400;
+    let spin = 0x8_2800;
+    let mut put = |offset: usize, word: u32| {
+        rom[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    put(0x00, 0xEA00_002E); // b 0xC0 (over the header)
+    put(0xC0, 0xE59F_0014); // ldr r0, [pc, #20]   (the word at 0xDC: the Pokémon)
+    put(0xC4, 0xE59F_1014); // ldr r1, [pc, #20]   (the word at 0xE0: the move)
+    put(0xC8, 0xE59F_E014); // ldr lr, [pc, #20]   (the word at 0xE4)
+    put(0xCC, 0xE59F_3014); // ldr r3, [pc, #20]   (the word at 0xE8)
+    put(0xD0, 0xE12F_FF13); // bx  r3
+    put(0xDC, mon);
+    put(0xE0, move_id);
+    put(0xE4, 0x0800_0000 + spin as u32 + 1);
+    put(0xE8, 0x0800_0000 + function as u32 + 1);
+    rom[0xAC..0xB0].copy_from_slice(game_code);
+    for (index, byte) in MON_KNOWS_MOVE.bytes.iter().enumerate() {
+        rom[function + index] = byte.unwrap_or(0);
+    }
+    rom[function + 16..function + 20].copy_from_slice(&[0x00, 0x20, 0xC0, 0x46]);
+    // The loop's branches, which the wildcards left at zero: `bne +1`,
+    // `b done`, `bls loop`, as the game has them.
+    rom[function + 22] = 0x01;
+    rom[function + 26] = 0x05;
+    rom[function + 36] = 0xF1;
+    for (index, byte) in PARTY_LOAD.bytes.iter().enumerate() {
+        rom[load + index] = byte.unwrap_or(0);
+    }
+    // `ldr r0, [pc, #imm]` at `load + 6`, whose pool entry is at `load + 0x40`.
+    let at = (load + 6) as u32;
+    rom[load + 6] = ((load as u32 + 0x40 - ((at + 4) & !3)) / 4) as u8;
+    rom[load + 0x40..load + 0x44].copy_from_slice(&0x0202_4284u32.to_le_bytes());
+    rom[spin..spin + 2].copy_from_slice(&0xE7FEu16.to_le_bytes()); // b .
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("gba-hm-test-{}-{id}.gba", std::process::id()));
+    std::fs::write(&path, rom).unwrap();
+    path
+}
+
+fn knows_move(game_code: &[u8; 4], mon: u32, move_id: u32) -> u32 {
+    let path = knows_move_rom(game_code, mon, move_id);
+    let mut emulator = Emulator::new(path.to_str().unwrap()).unwrap();
+    std::fs::remove_file(path).unwrap();
+    emulator.initialize_gba_startup(ROM_START).unwrap();
+    for _ in 0..200 {
+        emulator.step().unwrap();
+    }
+    emulator.cpu().registers[0]
+}
+
+#[test]
+fn the_first_pokemon_is_said_to_know_every_hm_and_nothing_else_changes() {
+    let first = 0x0202_4284;
+    for hm in crate::cheats::gen3::field_moves::HM_MOVES {
+        assert_eq!(knows_move(b"BPRE", first, u32::from(hm)), 1, "HM {hm}");
+    }
+    // The game's own answer ("no") stands for anything else.
+    assert_eq!(knows_move(b"BPRE", first, 33), 0, "Tackle");
+    assert_eq!(
+        knows_move(b"BPRE", first + 100, 15),
+        0,
+        "the second Pokémon"
+    );
+    assert_eq!(knows_move(b"BPRE", first + 500, 57), 0, "the sixth");
+    assert_eq!(
+        knows_move(b"BPRE", 0x0203_0000, 15),
+        0,
+        "not a party member"
+    );
+}
+
+#[test]
+fn the_hm_cheat_covers_every_supported_game_and_no_other() {
+    let first = 0x0202_4284;
+    for code in [b"BPRJ", b"BPGE", b"BPEE"] {
+        assert_eq!(knows_move(code, first, 15), 1, "{code:?}");
+    }
+    // Ruby and Sapphire have no such hook.
+    assert_eq!(knows_move(b"AXVE", first, 15), 0);
+    assert_eq!(knows_move(b"AXPE", first, 15), 0);
 }

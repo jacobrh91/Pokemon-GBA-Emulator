@@ -1,6 +1,5 @@
-//! The emulation thread: runs the console flat out or paced by audio or the
-//! wall clock, and publishes finished frames, audio and speed measurements to
-//! the UI thread.
+//! The emulation thread: runs the console paced by audio or the wall clock
+//! (or flat out) and publishes frames, audio and speed to the UI thread.
 
 use super::audio_output::AudioSink;
 use super::load_jitter::{JitterBag, advance_frames};
@@ -16,9 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const FRAME_DURATION: Duration = Duration::from_nanos(16_742_706);
-/// Audio the emulation thread keeps queued ahead of the device. Emulation is
-/// paced by this level rather than by the UI, so a stalled window (macOS Space
-/// swipes, dragging, resizing) cannot starve the audio.
+/// Audio kept queued ahead of the device. Pacing by this rather than by the
+/// UI means a stalled window cannot starve the audio.
 const TARGET_QUEUED_AUDIO_FRAMES: usize = SAMPLE_RATE as usize / 16;
 /// Longest the emulation thread waits for the audio queue to drain per frame.
 const MAX_AUDIO_WAIT: Duration = Duration::from_millis(40);
@@ -132,8 +130,7 @@ pub(super) fn emulation_loop(
     let mut instructions = 0_u64;
 
     while shared.running.load(Ordering::Relaxed) {
-        // A restart is applied between frames: persist the save, power-cycle
-        // the console (the save is kept) and drop audio from the old run.
+        // A restart is applied between frames.
         if shared.restart.swap(false, Ordering::Relaxed) {
             flush_save(&mut emulator, save_path);
             if let Err(error) = emulator.reset() {
@@ -151,8 +148,7 @@ pub(super) fn emulation_loop(
             speed_window_frames = 0;
         }
 
-        // Save states are taken and restored between frames, when the audio
-        // has been collected and no scanline is half drawn.
+        // Save states are taken and restored between frames.
         match shared.state_request.swap(0, Ordering::Relaxed) {
             STATE_SAVE => {
                 if save_state(&emulator, state_path) {
@@ -196,8 +192,7 @@ pub(super) fn emulation_loop(
         emulator.set_buttons(shared.buttons.load(Ordering::Relaxed));
         sync_cheat_options(shared, &mut applied_options_version, &mut emulator);
 
-        // Fast-forward emulates flat out but only draws the frames that will
-        // be shown. Decided here, at a frame boundary.
+        // Fast-forward only draws the frames that will be shown.
         let fast_forward = shared.fast_forward.load(Ordering::Relaxed);
         let draw_frame = !fast_forward || last_publish.elapsed() >= FAST_FORWARD_PUBLISH_INTERVAL;
         emulator.set_rendering(draw_frame);
@@ -221,7 +216,7 @@ pub(super) fn emulation_loop(
         // Cheats are rewritten once per finished frame.
         emulator.apply_cheats();
 
-        // Sped-up audio would only overflow the queue, so it is dropped.
+        // Sped-up audio is dropped.
         let samples = emulator.take_audio_samples();
         if let (Some(sink), false) = (&sink, fast_forward) {
             sink.push(&samples);
@@ -256,11 +251,10 @@ pub(super) fn emulation_loop(
         if fast_forward {
             let target = shared.fast_forward_target.load(Ordering::Relaxed);
             if target == 0 {
-                // MAX: no pacing at all; also drop any wall-clock debt.
+                // MAX: no pacing.
                 next_frame = Instant::now();
             } else {
-                // A fixed multiple of real time: each emulated frame owns
-                // 1/target of a console frame of wall-clock time.
+                // Each emulated frame owns 1/target of a console frame.
                 if !was_throttled {
                     next_frame = Instant::now();
                 }
@@ -269,7 +263,7 @@ pub(super) fn emulation_loop(
                 if next_frame > now {
                     thread::sleep(next_frame - now);
                 } else {
-                    // Cannot keep up (slow machine): run flat out, no debt.
+                    // Cannot keep up: run flat out.
                     next_frame = now;
                 }
             }

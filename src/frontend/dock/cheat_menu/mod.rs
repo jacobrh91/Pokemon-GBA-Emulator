@@ -1,38 +1,31 @@
 //! The cheat menu: a panel that opens above the dock from its CHEATS button.
 //!
-//! | Control | Option |
-//! |---|---|
-//! Every row has its own checkbox at the left, which switches that cheat on
-//! and off:
+//! Every row has a checkbox at its left that switches that cheat on and off:
 //!
 //! | Row | Controls after the checkbox |
 //! |---|---|
 //! | cheats file (only when it has codes) | |
-//! | wild Pokémon is *species* at level *n* | dropdown + level stepper (either may be left empty) |
-//! | perfect stats for | dropdown: wild Pokémon / opponents' Pokémon / both |
+//! | wild Pokémon is *species* at level *n* | dropdown + level stepper (either may be empty) |
+//! | perfect stats for | dropdown: wild / opponents' / both |
 //! | infinite money | |
 //! | 100% catch rate | |
 //! | all experience is boosted | |
-//! | shiny chance 1/1 … 1/1000 | stepper (- value +) |
+//! | shiny chance | stepper 1/1 … 1/1000 |
 //! | no random encounters | |
 //! | TMs are infinitely usable | none: always on, shown ticked |
+//! | the first Pokémon knows every HM | none: always on, shown ticked |
 //!
-//! Choosing a species or level, or a perfect-stats target, also
-//! switches its row on, so a choice never silently does nothing; unticking
-//! the row's checkbox keeps the choices for later.
+//! Choosing a species, level, target or chance also switches its row on;
+//! unticking a row keeps its choices.
 //!
-//! From the keyboard, while the menu is open (the game gets no buttons then):
-//! up and down move between the rows; on the wild row left and right move
-//! between its checkbox, species field and level buttons, and A uses the one in
-//! focus (on the species field it opens the list: up and down move through the
-//! Pokémon, A chooses, B leaves without choosing); on the perfect-stats row
-//! left and right cycle the target; A switches the other rows; B closes the
-//! menu.
+//! From the keyboard (the game gets no buttons while the menu is open): up
+//! and down move between rows; left and right move between the parts of the
+//! wild row, and cycle the perfect-stats target and the shiny chance; A uses
+//! the part in focus (on the species field it opens the list, where up and
+//! down move, A chooses and B leaves); B closes the menu.
 //!
-//! Interaction ([`CheatMenu::update`]) is separate from drawing (`draw.rs`) so
-//! it can be tested without a window. Options that do not change the game yet
-//! (see [`CheatOptions::is_live`]) are tagged SOON in the panel; at present
-//! every row is live.
+//! Interaction ([`CheatMenu::update`]) is separate from drawing (`draw.rs`)
+//! so it can be tested without a window.
 
 mod draw;
 
@@ -87,8 +80,7 @@ impl WildPart {
     }
 }
 
-/// The rows the keyboard can reach, top to bottom (the always-on row is only
-/// shown).
+/// The rows the keyboard can reach, top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FocusRow {
     FileCodes,
@@ -109,10 +101,8 @@ const WHEEL_ROWS: usize = 3;
 /// Width of the strip at the list's right edge that works as a scrollbar.
 const SCROLLBAR_WIDTH: i32 = 22;
 const LIST_ROW_HEIGHT: i32 = 28;
-/// How long a stepper button must be held before it starts repeating, the
-/// interval between repeats, and the faster interval after
-/// `FAST_AFTER_REPEATS` repeats. These are wall-clock times, so holding feels
-/// the same whatever rate the window is drawn at.
+/// Hold time before a stepper button repeats, the repeat interval, and the
+/// faster interval after `FAST_AFTER_REPEATS` repeats (wall-clock times).
 const REPEAT_DELAY: Duration = Duration::from_millis(400);
 const REPEAT_INTERVAL: Duration = Duration::from_millis(70);
 const FAST_REPEAT_INTERVAL: Duration = Duration::from_millis(30);
@@ -138,8 +128,7 @@ impl Hold {
         }
     }
 
-    /// Whether another step is due at `now`: after the delay, then at the
-    /// repeat interval, which shortens the longer the button stays down.
+    /// Whether another step is due at `now`.
     fn step_due(&mut self, now: Instant) -> bool {
         let interval = if self.repeats >= FAST_AFTER_REPEATS {
             FAST_REPEAT_INTERVAL
@@ -199,8 +188,10 @@ pub(super) struct MenuLayout {
     pub(super) shiny_value: Rect,
     pub(super) shiny_plus: Rect,
     pub(super) no_encounters: Rect,
-    /// Last in the list: a cheat that is always on, so its box is only shown.
+    /// The cheats that are always on, so their boxes are only shown: infinite
+    /// TMs, then the first Pokémon knowing every HM (last in the list).
     pub(super) always_on: Rect,
+    pub(super) always_on_hms: Rect,
     /// The open species list, below the dropdown.
     pub(super) list: Rect,
 }
@@ -211,7 +202,7 @@ impl MenuLayout {
     pub(super) fn new(width: usize, dock: Rect, file_row: bool) -> Self {
         // The optional file row pushes every other row down by one.
         let extra = if file_row { 44 } else { 0 };
-        let panel_height = 432 + extra;
+        let panel_height = 476 + extra;
         let x = (dock.x + dock.width - PANEL_WIDTH)
             .min(width as i32 - PANEL_WIDTH - 12)
             .max(12);
@@ -241,6 +232,7 @@ impl MenuLayout {
         let row_shiny = y + 302 + extra;
         let row_no_encounters = y + 346 + extra;
         let row_always_on = y + 390 + extra;
+        let row_always_on_hms = y + 434 + extra;
 
         // Rows with controls of their own start after their checkbox.
         let wild_label = (left + LEAD, row_wild - text_h / 2);
@@ -336,6 +328,7 @@ impl MenuLayout {
             shiny_plus,
             no_encounters: checkbox_at(left, row_no_encounters),
             always_on: checkbox_at(left, row_always_on),
+            always_on_hms: checkbox_at(left, row_always_on_hms),
             list: Rect {
                 x: dropdown.x,
                 y: dropdown.y + dropdown.height + 4,
@@ -509,8 +502,8 @@ impl CheatMenu {
         }
         // The target list was opened with the mouse; the keys dismiss it.
         self.perfect_list_open = false;
-        // The first key only shows where the focus is (the top row), so a
-        // press is never spent on a row that was not on show.
+        // The first key only shows the focus, so it never acts on a row that
+        // was not on show.
         if !self.focus_visible {
             self.focus_visible = true;
             self.focus = 0;
@@ -572,9 +565,8 @@ impl CheatMenu {
         self.set(options);
     }
 
-    /// Called every frame with whether the A key (Space or Enter) is held:
-    /// while it stays down on a level button, the step repeats like a held
-    /// mouse button. The press itself is a [`MenuNav::Toggle`].
+    /// Called every frame with whether the A key is held, to repeat a level
+    /// button; the press itself is a [`MenuNav::Toggle`].
     pub(super) fn hold_toggle(&mut self, held: bool, now: Instant) {
         let delta = match (self.open, self.focused_row(), self.wild_part) {
             (true, Some(FocusRow::Wild), WildPart::LevelDown)
@@ -672,9 +664,7 @@ impl CheatMenu {
         self.scroll_to_selection();
     }
 
-    /// Opens the perfect-stats list too. Normally only one list is open; the
-    /// launch smoke test wants both drawn so the real binary runs all of the
-    /// drawing code.
+    /// Opens the perfect-stats list too (for the launch smoke test).
     pub(super) fn open_perfect_list_for_smoke_test(&mut self) {
         self.open = true;
         self.perfect_list_open = true;
@@ -698,8 +688,7 @@ impl CheatMenu {
 
     fn set(&mut self, mut options: CheatOptions) {
         let old = self.options;
-        // A choice made in a row switches the row on, so it is never left
-        // doing nothing; unticking the row keeps the choice.
+        // A choice made in a row switches it on.
         if (options.wild_species != old.wild_species && options.wild_species.is_some())
             || (options.wild_level != old.wild_level && options.wild_level.is_some())
         {
@@ -734,15 +723,13 @@ impl CheatMenu {
         }
     }
 
-    /// Handles one frame of pointer input. `pressed` is true on the frame the
-    /// left button went down. Returns true when the pointer is over the menu
-    /// (so the dock beneath should not also react).
+    /// Handles one frame of pointer input (`pressed` is true on the frame the
+    /// button went down). Returns true when the pointer is over the menu.
     pub(super) fn update(&mut self, pointer: Pointer, pressed: bool, layout: &MenuLayout) -> bool {
         self.update_at(pointer, pressed, layout, Instant::now())
     }
 
-    /// [`Self::update`] at a given time, which the auto-repeat of the stepper
-    /// buttons depends on.
+    /// [`Self::update`] at a given time (for the stepper auto-repeat).
     pub(super) fn update_at(
         &mut self,
         pointer: Pointer,
@@ -913,9 +900,7 @@ impl CheatMenu {
                     self.set(options);
                 }
             }
-            // Any click closes the list: on a row it chose, elsewhere it
-            // simply dismisses. Either way the click is used up, so it does
-            // not also close the menu or press a button underneath.
+            // Any click closes the list (choosing if on a row) and is used up.
             self.dropdown_open = false;
             return true;
         }

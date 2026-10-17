@@ -1,9 +1,8 @@
-//! The perfect-stats cheat: Pokémon the game creates get the maximum value
-//! (31) in every IV, for the wild Pokémon, the opponents' Pokémon or both.
+//! The perfect-stats cheat: Pokémon the game creates get 31 in every IV, for
+//! wild Pokémon, opponents' Pokémon or both.
 //!
 //! **Mechanism: change a value in the middle of a routine**, at the same place
-//! as [`super::shiny`] (the join point of `CreateBoxMon` after the OT ID is
-//! known), so the scan is shared and finds nothing new.
+//! as [`super::shiny`], so the scan is shared.
 //!
 //! # How IVs are made
 //!
@@ -18,24 +17,18 @@
 //! ...                              ; otherwise every IV is fixed_iv
 //! ```
 //!
-//! So storing 31 there before that test makes all six IVs 31, with the game's
-//! own code doing the rest (the IVs are packed and encrypted with the other
-//! fields; nothing is written by hand). Wild encounters pass 32 (random);
-//! trainers' Pokémon pass a fixed value, which is 0 for the trainer checked
-//! (a step up from the v1.1 grass state), so the cheat lifts those from zero.
-//! Nature, gender and everything else keep their values.
+//! So storing 31 there before that test makes all six IVs 31 and the game's
+//! own code does the rest. Wild encounters pass 32 (random); trainers pass a
+//! fixed value, which the cheat lifts.
 //!
 //! # Which Pokémon
 //!
-//! * **Wild**: those built while `CreateWildMon` is running. The emulator
-//!   notes its return address (the link register) at its entry and the
-//!   Pokémon is a wild one until the CPU reaches that address. This is the
-//!   same set the wild-encounter override covers: grass, surfing, fishing,
-//!   rock smash. (Scripted encounters, such as a static Snorlax, are built
-//!   elsewhere and are not covered.)
-//! * **Opponents**: those built with the OT-ID type `2`
-//!   (`OT_ID_RANDOM_NO_SHINY`), which the game uses for trainers' parties
-//!   only. At the hook the type is still in `r10`.
+//! * **Wild**: those built while `CreateWildMon` is running (grass, surfing,
+//!   fishing, rock smash; scripted encounters are built elsewhere). The
+//!   emulator notes its return address at entry and the Pokémon is wild until
+//!   the CPU reaches it.
+//! * **Opponents**: those built with OT-ID type `2` (`OT_ID_RANDOM_NO_SHINY`),
+//!   which only trainers' parties use. At the hook it is still in `r10`.
 
 /// Stack offset, relative to `sp` at the hook, of the `fixed_iv` byte.
 pub(crate) const FIXED_IV_OFFSET: u32 = 0x11;

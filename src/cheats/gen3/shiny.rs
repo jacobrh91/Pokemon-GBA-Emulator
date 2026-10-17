@@ -1,10 +1,9 @@
-//! The all-Pokémon-are-shiny cheat: every Pokémon the game creates is shiny.
+//! The shiny cheat: Pokémon the game creates are made shiny, at a chosen odds.
 //!
-//! **Mechanism: change values in the middle of a routine.** Like
-//! [`super::catch_rate`], but what is changed is the Pokémon being built: the
-//! emulator stops when the CPU is about to run one instruction inside
-//! `CreateBoxMon`, where both the *personality value* and the *OT ID* are
-//! known, and rewrites the personality (see `Emulator::step`).
+//! **Mechanism: change values in the middle of a routine.** The emulator
+//! stops at one instruction inside `CreateBoxMon`, where the personality
+//! value (PID) and the OT ID are both known, and rewrites the PID (see
+//! `Emulator::step`).
 //!
 //! # What makes a Pokémon shiny
 //!
@@ -14,19 +13,12 @@
 //! (OT_ID_high ^ OT_ID_low ^ PID_high ^ PID_low) < 8
 //! ```
 //!
-//! where the OT ID is the 32-bit trainer ID (visible ID in the low half,
-//! secret ID in the high half) of its original trainer and the PID is its
-//! 32-bit personality value. Nothing else is stored: shininess is not a flag,
-//! so a Pokémon is made shiny by choosing its PID (or its OT ID) to satisfy
-//! the test. The game itself does the opposite for opponents' Pokémon, which
-//! redraw their OT ID until the sum is 8 or more.
+//! Shininess is not stored, so a Pokémon is made shiny by choosing its PID.
 //!
 //! # Where
 //!
-//! Every Pokémon, wild or not, party or box, goes through `CreateBoxMon`. It
-//! draws a PID (or takes a fixed one), then picks the OT ID (the player's, a
-//! preset one, or a random non-shiny one), and then stores both. The three OT
-//! branches join at one instruction, which is the hook:
+//! Every Pokémon goes through `CreateBoxMon`, which draws a PID, picks the OT
+//! ID and stores both. The OT ID branches join at one instruction, the hook:
 //!
 //! ```text
 //! 10 7B   ldrb r0, [r2, #0xC]   ┐
@@ -36,48 +28,35 @@
 //! 00 06   lsls r0, r0, #24      │
 //! 01 43   orrs r1, r0           ┘
 //! 06 91   str  r1, [sp, #0x18]     OT ID is a local at sp+0x18
-//! 38 1C   adds r0, r7, #0          <- the hook: r7 = the BoxPokemon, the PID
-//! 01 21   movs r1, #1                 is a local at sp+0x14 and was stored in
-//! 4A 46   mov  r2, sb                 the BoxPokemon already; the OT ID is
-//!                                     stored next
+//! 38 1C   adds r0, r7, #0          <- the hook: r7 = the BoxPokemon; the PID
+//! 01 21   movs r1, #1                 (local sp+0x14) is already stored in it
+//! 4A 46   mov  r2, sb
 //! ```
 //!
-//! The 20 bytes contain no `BL` and no PC-relative load, so they are the same
-//! in every build examined; as for the other scans, the ROM is used only when
-//! there is exactly one aligned match in a `BPR?` cartridge (see [`super`]).
+//! The 20 bytes contain no `BL` or PC-relative load, so they are the same in
+//! every build examined (see [`super`] for the scan).
 //!
 //! # What is changed
 //!
-//! The PID is rewritten in both places it lives (the local, which the rest of
-//! `CreateBoxMon` reads, and the first word of the BoxPokemon). Nothing in
-//! the BoxPokemon is encrypted yet: that starts with the next field written.
-//! The new PID keeps everything the game derives from it that a player can
-//! see, where possible:
-//!
-//! * the **low byte** (gender, and with bit 0 the ability slot),
-//! * the **nature** (`PID % 25`),
-//!
-//! and only bits 8..16 and the upper half change (see [`shiny_personality`]).
-//! A Pokémon that is already shiny is left alone. **Unown is skipped**: its
-//! letter is made of the low two bits of each PID byte and the game chooses
-//! the letter first, so no shiny PID can keep it.
-//!
-//! Because the OT ID is not touched, the player's own Pokémon stay the
-//! player's (they would otherwise count as traded and disobey).
+//! The PID is rewritten in the local and in the BoxPokemon. The new PID keeps
+//! the low byte (gender, ability slot) and the nature (`PID % 25`), so only
+//! the colours change (see [`shiny_personality`]). Already-shiny Pokémon are
+//! left alone, and so is Unown, whose letter is made of the PID's low bits.
+//! The OT ID is not touched, so the player's Pokémon stay the player's.
 
-use super::find_in_firered;
+use super::{Signature, exact};
 
-/// The bytes around the join of the OT-ID branches; see the module
-/// documentation.
-pub(crate) const SIGNATURE: [u8; 20] = [
-    0x10, 0x7B, 0x00, 0x04, 0x01, 0x43, 0x50, 0x7B, 0x00, 0x06, 0x01, 0x43, 0x06, 0x91, 0x38, 0x1C,
-    0x01, 0x21, 0x4A, 0x46,
-];
+/// The bytes around the join of the OT-ID branches. The hook is the `adds r0,
+/// r7, #0` 14 bytes in.
+pub(crate) const SIGNATURE: Signature = Signature::new(
+    &exact([
+        0x10, 0x7B, 0x00, 0x04, 0x01, 0x43, 0x50, 0x7B, 0x00, 0x06, 0x01, 0x43, 0x06, 0x91, 0x38,
+        0x1C, 0x01, 0x21, 0x4A, 0x46,
+    ]),
+    14,
+);
 
-/// Offset of the `adds r0, r7, #0` within the signature.
-const HOOK_OFFSET: usize = 14;
-
-/// Stack offsets, relative to `sp` at the hook, of `CreateBoxMon`'s locals.
+/// Offsets from `sp` at the hook of `CreateBoxMon`'s locals.
 pub(crate) const SPECIES_OFFSET: u32 = 0x0E;
 pub(crate) const PERSONALITY_OFFSET: u32 = 0x14;
 pub(crate) const OT_ID_OFFSET: u32 = 0x18;
@@ -85,26 +64,21 @@ pub(crate) const OT_ID_OFFSET: u32 = 0x18;
 /// Register holding the `BoxPokemon` pointer at the hook.
 pub(crate) const BOX_MON_REGISTER: usize = 7;
 
-/// Species number of Unown, which is left alone (see the module docs).
+/// Species number of Unown, which is left alone.
 pub(crate) const UNOWN: u16 = 201;
 
 /// The shiny test's bound: a sum below this is shiny.
 const SHINY_ODDS: u32 = 8;
 
-/// The bus address of the instruction after which the OT ID is stored, if
-/// `rom` is a FireRed cartridge and the place can be identified
-/// unambiguously.
+/// The hook address in `rom`, if it is a recognised FireRed or LeafGreen
+/// cartridge.
 pub fn find(rom: &[u8]) -> Option<u32> {
-    let pattern: Vec<Option<u8>> = SIGNATURE.iter().map(|byte| Some(*byte)).collect();
-    find_in_firered(rom, &pattern, HOOK_OFFSET)
+    SIGNATURE.find(rom)
 }
 
-/// Whether the Pokémon with this personality value and OT ID is among the
-/// one in `one_in` that the cheat makes shiny. The decision is a hash of the
-/// two values, which the game drew at random, so it is evenly spread, needs
-/// no random numbers of the emulator's own (and none of the game's, which
-/// would change what the game does next), and gives the same answer for the
-/// same Pokémon. `one_in` of 1 (or 0) is every Pokémon.
+/// Whether this Pokémon is among the one in `one_in` that the cheat makes
+/// shiny. A hash of the PID and OT ID the game drew decides, so no random
+/// numbers (the game's would change what it does next) are needed.
 pub fn chosen(personality: u32, ot_id: u32, one_in: u32) -> bool {
     if one_in <= 1 {
         return true;
@@ -224,35 +198,15 @@ mod tests {
         assert!(is_shiny(0x1234_5678, 0x1234_5678 ^ 0x0000_0003));
     }
 
-    /// A header-sized prefix with the signature at each offset.
-    fn rom(game_code: &[u8; 4], offsets: &[usize]) -> Vec<u8> {
-        let mut rom = vec![0u8; 0x1000];
-        rom[0xAC..0xB0].copy_from_slice(game_code);
-        for &offset in offsets {
-            rom[offset..offset + SIGNATURE.len()].copy_from_slice(&SIGNATURE);
-        }
-        rom
-    }
-
     #[test]
-    fn the_hook_is_the_instruction_after_the_ot_id_is_assembled() {
-        assert_eq!(find(&rom(b"BPRE", &[0x400])), Some(0x0800_040E));
-        assert_eq!(find(&rom(b"BPRJ", &[0x7F0])), Some(0x0800_07FE));
-    }
-
-    #[test]
-    fn the_place_is_declined_unless_unique_aligned_and_firered() {
-        assert_eq!(find(&rom(b"BPRE", &[])), None);
-        assert_eq!(find(&rom(b"BPRE", &[0x400, 0x800])), None);
-        assert_eq!(find(&rom(b"BPRE", &[0x401])), None);
-        assert_eq!(find(&rom(b"AXVE", &[0x400])), None);
-        assert_eq!(find(&rom(b"BPGE", &[0x400])), None);
-        assert_eq!(find(&[]), None);
+    fn the_place_follows_the_rules_for_one_place() {
+        crate::cheats::gen3::test_support::assert_single_match_rules(find, &SIGNATURE);
     }
 
     #[test]
     fn the_signature_decodes_to_the_documented_instructions() {
-        let halfwords: Vec<u16> = SIGNATURE
+        let bytes: Vec<u8> = SIGNATURE.bytes.iter().map(|b| b.unwrap()).collect();
+        let halfwords: Vec<u16> = bytes
             .chunks(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect();

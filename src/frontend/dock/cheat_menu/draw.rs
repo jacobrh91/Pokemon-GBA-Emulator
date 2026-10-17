@@ -229,28 +229,27 @@ impl CheatMenu {
             centre(layout.no_encounters),
         );
         // Always on: ticked, dimmed, tagged, and not a control.
-        canvas.rounded_rect(layout.always_on, 6, TRACK_COLOR, 0.8);
-        for (dx, dy) in CHECK_MARK {
-            canvas.rect(
-                layout.always_on.x + dx - 1,
-                layout.always_on.y + dy - 4,
-                3,
-                3,
+        for (rect, label) in [
+            (layout.always_on, "TMS ARE INFINITELY USABLE"),
+            (layout.always_on_hms, "FIRST POKEMON KNOWS EVERY HM"),
+        ] {
+            canvas.rounded_rect(rect, 6, TRACK_COLOR, 0.8);
+            for (dx, dy) in CHECK_MARK {
+                canvas.rect(rect.x + dx - 1, rect.y + dy - 4, 3, 3, OFF_COLOR);
+            }
+            canvas.text(
+                label,
+                rect.x + rect.width + 12,
+                centre(rect) - TEXT_HEIGHT / 2,
                 OFF_COLOR,
             );
+            canvas.text(
+                ALWAYS_ON_TAG,
+                right - text_width(ALWAYS_ON_TAG),
+                centre(rect) - TEXT_HEIGHT / 2,
+                ALWAYS_ON_COLOR,
+            );
         }
-        canvas.text(
-            "TMS ARE INFINITELY USABLE",
-            layout.always_on.x + layout.always_on.width + 12,
-            centre(layout.always_on) - TEXT_HEIGHT / 2,
-            OFF_COLOR,
-        );
-        canvas.text(
-            ALWAYS_ON_TAG,
-            right - text_width(ALWAYS_ON_TAG),
-            centre(layout.always_on) - TEXT_HEIGHT / 2,
-            ALWAYS_ON_COLOR,
-        );
 
         if self.dropdown_open() {
             self.draw_list(canvas, layout);

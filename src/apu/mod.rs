@@ -2,8 +2,7 @@
 //! FIFO channels, mixed to stereo at 32768 Hz (GBATEK "GBA Sound Controller",
 //! mGBA `audio.c`).
 //!
-//! The APU does not own the I/O registers. The memory bus keeps them in its
-//! register file and lends it to [`Apu::advance`] and [`Apu::register_written`].
+//! The I/O registers live in the memory bus, which lends them to the APU.
 
 mod state;
 

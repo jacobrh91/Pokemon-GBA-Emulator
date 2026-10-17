@@ -1,13 +1,12 @@
 //! Per-ROM user settings, kept in a small `key = value` text file beside the
 //! ROM so they are restored the next time the game is played.
 //!
-//! The format is deliberately forgiving: unknown keys, malformed lines and
-//! out-of-range values are ignored (falling back to the default for that
-//! setting), so an old or hand-edited file never prevents a game from
-//! starting.
+//! The format is forgiving: unknown keys, malformed lines and out-of-range
+//! values fall back to the default, so a bad file never blocks a game.
 
+use crate::cheats::gen3::field_moves::FieldMoves;
 use crate::cheats::options::{CheatOptions, MAX_LEVEL, PerfectTarget, ShinyOdds};
-use crate::cheats::scan::{CheatScan, RomFingerprint};
+use crate::cheats::scan::{CheatScan, RomFingerprint, SCAN_VERSION};
 use crate::cheats::species;
 use crate::game_library;
 use std::fs;
@@ -98,7 +97,9 @@ impl Settings {
         let (mut scan_rom, mut scan_wild, mut scan_catch, mut scan_shiny) =
             (None, None, None, None);
         let (mut scan_money, mut scan_traded, mut scan_roll) = (None, None, None);
-        let (mut scan_tm_a, mut scan_tm_b) = (None, None);
+        let mut scan_tm = None;
+        let mut scan_field_moves = None;
+        let mut scan_version = None;
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("");
             let Some((key, value)) = line.split_once('=') else {
@@ -172,6 +173,7 @@ impl Settings {
                         settings.cheat_options.wild_level = Some(level);
                     }
                 }
+                "cheat_scan_version" => scan_version = value.parse::<u32>().ok(),
                 "cheat_scan_rom" => scan_rom = RomFingerprint::parse(value),
                 "cheat_scan_create_wild_mon" => scan_wild = parse_address(value),
                 "cheat_scan_catch_check" => scan_catch = parse_address(value),
@@ -179,8 +181,8 @@ impl Settings {
                 "cheat_scan_money_balance" => scan_money = parse_address(value),
                 "cheat_scan_exp_traded" => scan_traded = parse_address(value),
                 "cheat_scan_encounter_roll" => scan_roll = parse_address(value),
-                "cheat_scan_tm_use_a" => scan_tm_a = parse_address(value),
-                "cheat_scan_tm_use_b" => scan_tm_b = parse_address(value),
+                "cheat_scan_tm_uses" => scan_tm = parse_address_list(value),
+                "cheat_scan_field_moves" => scan_field_moves = parse_field_moves(value),
                 "window_width" => width = value.parse::<u32>().ok(),
                 "window_height" => height = value.parse::<u32>().ok(),
                 "fast_forward" => match value.to_ascii_lowercase().as_str() {
@@ -193,6 +195,10 @@ impl Settings {
                 _ => {}
             }
         }
+        // Results from other rules are not believed (see `SCAN_VERSION`).
+        if scan_version != Some(SCAN_VERSION) {
+            scan_rom = None;
+        }
         if let (
             Some(rom),
             Some(create_wild_mon),
@@ -201,8 +207,8 @@ impl Settings {
             Some(money_balance),
             Some(exp_traded),
             Some(encounter_roll),
-            Some(tm_use_a),
-            Some(tm_use_b),
+            Some(tm_uses),
+            Some(field_moves),
         ) = (
             scan_rom,
             scan_wild,
@@ -211,8 +217,8 @@ impl Settings {
             scan_money,
             scan_traded,
             scan_roll,
-            scan_tm_a,
-            scan_tm_b,
+            scan_tm,
+            scan_field_moves,
         ) {
             settings.cheat_scan = Some(CheatScan {
                 rom,
@@ -222,8 +228,8 @@ impl Settings {
                 money_balance,
                 exp_traded,
                 encounter_roll,
-                tm_use_a,
-                tm_use_b,
+                tm_uses,
+                field_moves,
             });
         }
         let options = &mut settings.cheat_options;
@@ -322,6 +328,7 @@ impl Settings {
                 "# Where the built-in cheats hook in this ROM (found by the first scan;\n",
             );
             text.push_str("# ignored, and scanned again, if the ROM changes).\n");
+            text.push_str(&format!("cheat_scan_version = {SCAN_VERSION}\n"));
             text.push_str(&format!("cheat_scan_rom = {}\n", scan.rom.as_str()));
             for (key, address) in [
                 ("cheat_scan_create_wild_mon", scan.create_wild_mon),
@@ -330,14 +337,30 @@ impl Settings {
                 ("cheat_scan_money_balance", scan.money_balance),
                 ("cheat_scan_exp_traded", scan.exp_traded),
                 ("cheat_scan_encounter_roll", scan.encounter_roll),
-                ("cheat_scan_tm_use_a", scan.tm_use_a),
-                ("cheat_scan_tm_use_b", scan.tm_use_b),
             ] {
                 match address {
                     Some(address) => text.push_str(&format!("{key} = {address:#010X}\n")),
                     None => text.push_str(&format!("{key} = none\n")),
                 }
             }
+            let uses = if scan.tm_uses.is_empty() {
+                "none".to_owned()
+            } else {
+                scan.tm_uses
+                    .iter()
+                    .map(|address| format!("{address:#010X}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            text.push_str(&format!("cheat_scan_tm_uses = {uses}\n"));
+            let moves = match scan.field_moves {
+                Some(moves) => format!(
+                    "{:#010X}, {:#010X}",
+                    moves.knows_move_return, moves.party_base
+                ),
+                None => "none".to_owned(),
+            };
+            text.push_str(&format!("cheat_scan_field_moves = {moves}\n"));
         }
         text
     }
@@ -353,6 +376,31 @@ fn parse_address(value: &str) -> Option<Option<u32>> {
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))?;
     u32::from_str_radix(digits, 16).ok().map(Some)
+}
+
+/// A comma-separated list of hex addresses, or `none` for the empty list;
+/// `None` for anything else.
+fn parse_address_list(value: &str) -> Option<Vec<u32>> {
+    if value.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|part| parse_address(part.trim()).flatten())
+        .collect()
+}
+
+/// `Some(None)` for `none`, `Some(Some(..))` for the two addresses
+/// (`MonKnowsMove`'s return, the party array), `None` for anything else.
+fn parse_field_moves(value: &str) -> Option<Option<FieldMoves>> {
+    match parse_address_list(value)?.as_slice() {
+        [] => Some(None),
+        [knows_move_return, party_base] => Some(Some(FieldMoves {
+            knows_move_return: *knows_move_return,
+            party_base: *party_base,
+        })),
+        _ => None,
+    }
 }
 
 fn set_flag(value: &str, target: &mut bool) {
@@ -393,8 +441,11 @@ mod tests {
                 money_balance: Some(0x0809_FD7C),
                 exp_traded: Some(0x0804_4288),
                 encounter_roll: Some(0x0808_2BDA),
-                tm_use_a: Some(0x0812_4F24),
-                tm_use_b: Some(0x0812_4FF0),
+                tm_uses: vec![0x0812_4F24, 0x0812_4FF0],
+                field_moves: Some(FieldMoves {
+                    knows_move_return: 0x0812_5B60,
+                    party_base: 0x0202_4284,
+                }),
             }),
         };
         assert_eq!(Settings::parse(&settings.to_text()), settings);
@@ -601,13 +652,13 @@ window_height = 50
     fn an_incomplete_or_malformed_scan_is_dropped() {
         let rom = RomFingerprint::of(&[9]);
         let full = format!(
-            "cheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\ncheat_scan_money_balance = 0x0809FD7C\ncheat_scan_exp_traded = 0x08044288\ncheat_scan_encounter_roll = 0x08082BDA\ncheat_scan_tm_use_a = 0x08124F24\ncheat_scan_tm_use_b = 0x08124FF0\n",
+            "cheat_scan_version = {SCAN_VERSION}\ncheat_scan_rom = {}\ncheat_scan_create_wild_mon = 0x08001000\ncheat_scan_catch_check = none\ncheat_scan_shiny = 0x0803DB92\ncheat_scan_money_balance = 0x0809FD7C\ncheat_scan_exp_traded = 0x08044288\ncheat_scan_encounter_roll = 0x08082BDA\ncheat_scan_tm_uses = 0x08124F24, 0x08124FF0\ncheat_scan_field_moves = 0x08125B60, 0x02024284\n",
             rom.as_str()
         );
         let scan = Settings::parse(&full).cheat_scan.unwrap();
         assert_eq!(scan.create_wild_mon, Some(0x0800_1000));
         assert_eq!(scan.catch_check, None);
-        for missing in 0..9 {
+        for missing in 0..10 {
             let partial: String = full
                 .lines()
                 .enumerate()
@@ -618,6 +669,42 @@ window_height = 50
         }
         let bad = full.replace("0x08001000", "banana");
         assert_eq!(Settings::parse(&bad).cheat_scan, None);
+    }
+
+    #[test]
+    fn a_scan_cached_under_other_rules_is_not_believed() {
+        let rom = RomFingerprint::of(&[9]);
+        let scan = CheatScan {
+            rom,
+            create_wild_mon: None,
+            catch_check: None,
+            shiny_point: None,
+            money_balance: None,
+            exp_traded: None,
+            encounter_roll: None,
+            tm_uses: Vec::new(),
+            field_moves: None,
+        };
+        let settings = Settings {
+            cheat_scan: Some(scan),
+            ..Settings::default()
+        };
+        let text = settings.to_text();
+        assert!(text.contains(&format!("cheat_scan_version = {SCAN_VERSION}")));
+        assert_eq!(Settings::parse(&text), settings);
+        // The same results from an older version, or from before there was
+        // one (a file written by an earlier build), are dropped.
+        let older = text.replace(
+            &format!("cheat_scan_version = {SCAN_VERSION}"),
+            &format!("cheat_scan_version = {}", SCAN_VERSION - 1),
+        );
+        assert_eq!(Settings::parse(&older).cheat_scan, None);
+        let unversioned: String = text
+            .lines()
+            .filter(|line| !line.starts_with("cheat_scan_version"))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert_eq!(Settings::parse(&unversioned).cheat_scan, None);
     }
 
     #[test]

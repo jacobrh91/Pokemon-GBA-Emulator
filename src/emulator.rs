@@ -1,5 +1,5 @@
 use crate::cheats::Cheats;
-use crate::cheats::firered::{experience, money, perfect_stats, shiny};
+use crate::cheats::gen3::{experience, field_moves, money, perfect_stats, shiny};
 use crate::cheats::options::CheatOptions;
 use crate::cheats::scan::CheatScan;
 use crate::cpu::Cpu;
@@ -17,16 +17,14 @@ const HOOK_FILTER_BITS: usize = 1 << 15;
 const THUMB_STATE: u32 = 1 << 5;
 /// CPSR bit that masks IRQs.
 const IRQ_DISABLED: u32 = 1 << 7;
-/// `cheat_hook` when the cheats are not tied to a ROM address; the program
-/// counter is never this value.
+/// A hook address that is not set; the program counter is never this value.
 const NO_HOOK: u32 = u32::MAX;
 /// A register value that is never written: "leave this argument alone".
 const NO_VALUE: u32 = u32::MAX;
-/// A value of the catch calculation's `odds` that always passes the game's
-/// `odds > 254` test.
+/// Catch `odds` that always pass the game's `odds > 254` test.
 const CATCH_ALWAYS_ODDS: u32 = 0xFF;
 
-/// Granularity at which a halted CPU lets the rest of the system advance.
+/// Cycles a halted CPU advances per step.
 const HALT_STEP_CYCLES: u32 = 32;
 
 pub struct Emulator {
@@ -39,85 +37,55 @@ pub struct Emulator {
     skip_idle_loops: bool,
     rom_path: String,
     cheats: Cheats,
-    /// The ROM address the cheats are tied to while they are enabled, or
-    /// `NO_HOOK`.
+    /// ROM address the cheats file's codes run at while enabled, or `NO_HOOK`.
     cheat_hook: u32,
-    /// Bus address of the game's `CreateWildMon`, found once by a signature
-    /// scan of the ROM (see [`wild_species`]); `None` if not recognised.
-    create_wild_mon: Option<u32>,
-    /// The cheat menu's options.
     cheat_options: CheatOptions,
-    /// Bus address of the catch check's `cmp r6, #0xFE`, found by a signature
-    /// scan (see [`catch_rate`]); `None` if not recognised.
+    // Each built-in cheat has the address its signature scan found (`None`
+    // if the ROM is not recognised) and the hook that is armed while it is on.
+    create_wild_mon: Option<u32>,
     catch_check: Option<u32>,
-    /// Where the 100% catch rate cheat is applied while it is on, or
-    /// `NO_HOOK`.
     catch_hook: u32,
-    /// Bus address in `CreateBoxMon` where the personality value and OT ID are
-    /// both known, found by a signature scan (see [`shiny`]); `None` if not
-    /// recognised.
     shiny_point: Option<u32>,
-    /// Where the cheats that change a Pokémon as it is built (all shiny,
-    /// perfect stats) are applied while one is on, or `NO_HOOK`.
     build_hook: u32,
-    /// The `bx lr` at the end of `GetMoney`, found by a signature scan (see
-    /// [`money`]); `None` if not recognised.
     money_balance: Option<u32>,
-    /// Where the infinite-money cheat is applied while it is on, or
-    /// `NO_HOOK`.
     money_hook: u32,
-    /// Where `IsTradedMon` has fetched a Pokémon's OT ID, found by a signature
-    /// scan (see [`experience`]); `None` if not recognised.
     exp_traded: Option<u32>,
-    /// Where the boosted-experience cheat is applied while it is on, or
-    /// `NO_HOOK`.
     exp_hook: u32,
-    /// The end of the wild-encounter dice roll, found by a signature scan (see
-    /// `cheats::firered::encounters`); `None` if not recognised.
     encounter_roll: Option<u32>,
-    /// Where the no-random-encounters cheat is applied while it is on, or
-    /// `NO_HOOK`.
     encounter_hook: u32,
-    /// The two calls that take a TM out of the bag, found by a signature scan
-    /// (see `cheats::firered::tm`); `None` if not recognised. The cheat is
-    /// always on, so these are the hooks themselves.
-    tm_use_a: Option<u32>,
-    tm_use_b: Option<u32>,
-    /// Which of those cheats are on.
+    /// The two TM-use calls; the cheat is always on, so these are the hooks.
+    tm_uses: Vec<u32>,
+    /// Where `MonKnowsMove` ends and where the party array is, found by
+    /// signature scans (see `cheats::gen3::field_moves`); `None` if not
+    /// recognised. The cheat is always on, so this is the hook itself.
+    field_moves: Option<field_moves::FieldMoves>,
     make_shiny: bool,
-    /// One bit per halfword of address (folded) that may carry a hook; the
-    /// per-instruction test for "is this a hooked address".
-    hook_filter: Box<[u64; HOOK_FILTER_BITS / 64]>,
     /// With `make_shiny`: one Pokémon in this many is made shiny.
     shiny_one_in: u32,
     perfect_wild: bool,
     perfect_opponents: bool,
-    /// Entry of `CreateWildMon` while a perfect-stats row needs to know when
-    /// a wild Pokémon is being built, or `NO_HOOK`.
+    /// One bit per (folded) halfword address that may carry a hook.
+    hook_filter: Box<[u64; HOOK_FILTER_BITS / 64]>,
+    /// `CreateWildMon`'s entry while perfect stats must tell wild Pokémon
+    /// apart, and its return address while it runs.
     wild_scope_hook: u32,
-    /// Where `CreateWildMon` returns to while it is running, or `NO_HOOK`.
     wild_return: u32,
-    /// Where the wild-encounter override is applied while it is active, or
-    /// `NO_HOOK`, and the species / level written there (`NO_VALUE` to keep
-    /// the game's).
+    /// Where the wild-encounter override acts, and the species and level it
+    /// writes there (`NO_VALUE` keeps the game's).
     wild_species_hook: u32,
     wild_species: u32,
     wild_level: u32,
 }
 
 impl Emulator {
-    /// Creates an emulator with a mapped ROM and default CPU/PPU state.
-    ///
-    /// Initializes the bus and devices without configuring CPU boot state.
-    /// Call `initialize_gba_startup` or set the CPU PC and execution mode
+    /// Creates an emulator with a mapped ROM. Call `initialize_gba_startup`
     /// before stepping.
     pub fn new(rom_path: &str) -> io::Result<Self> {
         Self::with_cheat_scan(rom_path, None)
     }
 
-    /// Like [`Emulator::new`], reusing the cheat hook addresses of an earlier
-    /// scan of this same ROM (as kept in the settings file) instead of
-    /// scanning again. A scan recorded for a different ROM is ignored.
+    /// Like [`Emulator::new`], reusing the hook addresses of an earlier scan
+    /// of this ROM instead of scanning again (a scan of another ROM is ignored).
     pub fn with_cheat_scan(rom_path: &str, previous: Option<&CheatScan>) -> io::Result<Self> {
         let memory = MemoryBus::new(rom_path)?;
         let CheatScan {
@@ -127,8 +95,8 @@ impl Emulator {
             money_balance,
             exp_traded,
             encounter_roll,
-            tm_use_a,
-            tm_use_b,
+            tm_uses,
+            field_moves,
             ..
         } = CheatScan::for_rom(&memory.rom, previous);
         let mut emulator = Self {
@@ -153,8 +121,8 @@ impl Emulator {
             exp_hook: NO_HOOK,
             encounter_roll,
             encounter_hook: NO_HOOK,
-            tm_use_a,
-            tm_use_b,
+            tm_uses,
+            field_moves,
             make_shiny: false,
             hook_filter: Box::new([0; HOOK_FILTER_BITS / 64]),
             shiny_one_in: 1,
@@ -171,12 +139,8 @@ impl Emulator {
         Ok(emulator)
     }
 
-    /// Restarts the game as if the console had been power-cycled: CPU, RAM,
-    /// I/O, video, audio and timing return to their boot state and the CPU
-    /// starts at the cartridge entry point. The cartridge's backup memory
-    /// (the save) is kept, exactly as it would survive a reset on hardware.
-    ///
-    /// The `set_rendering` and idle-skipping switches keep their settings.
+    /// Power-cycles the console: everything returns to its boot state except
+    /// the cartridge's backup memory (the save).
     pub fn reset(&mut self) -> io::Result<()> {
         let save_image = self.memory.save_data().to_vec();
         let mut memory = MemoryBus::new(&self.rom_path)?;
@@ -198,8 +162,7 @@ impl Emulator {
     }
 
     pub fn step(&mut self) -> io::Result<u32> {
-        // A halted CPU and the BIOS hooks (SWI vector, IRQ return stub, in
-        // the first 0x200 bytes) are the rare cases, kept out of line.
+        // A halted CPU and the BIOS hooks (first 0x200 bytes) are rare.
         if (self.cpu.halted || self.cpu.registers[15] < 0x200)
             && let Some(cycles) = self.step_halted_or_bios()?
         {
@@ -207,8 +170,7 @@ impl Emulator {
         }
 
         let pc_before = self.cpu.registers[15];
-        // Hooks are ROM addresses; one bit test says whether this instruction
-        // might be one, which it almost never is.
+        // One bit test says whether this address might be hooked.
         if self.hook_filter[Self::hook_slot(pc_before) >> 6] >> (Self::hook_slot(pc_before) & 63)
             & 1
             != 0
@@ -221,7 +183,6 @@ impl Emulator {
             self.cpu.step_arm(&mut self.memory)
         }?;
         self.advance_bus(cycles);
-        // After most instructions there is nothing more to do.
         if self.memory.dma_stall_pending()
             || (self.cpu.cpsr & IRQ_DISABLED == 0 && self.memory.irq_pending())
             || (self.skip_idle_loops && self.cpu.registers[15] <= pc_before)
@@ -231,9 +192,8 @@ impl Emulator {
         Ok(cycles)
     }
 
-    /// The part of [`Self::step`] for a halted CPU and for the BIOS hooks:
-    /// `Some(cycles)` if the step is complete, `None` to go on and execute an
-    /// instruction.
+    /// The halted-CPU and BIOS-hook part of [`Self::step`]: `Some(cycles)` if
+    /// the step is complete, `None` to execute an instruction.
     #[inline(never)]
     fn step_halted_or_bios(&mut self) -> io::Result<Option<u32>> {
         if self.cpu.halted {
@@ -258,16 +218,13 @@ impl Emulator {
         Ok(None)
     }
 
-    /// What follows an instruction when a DMA transfer stalled it, an
-    /// interrupt is due or it ended a loop iteration; returns the cycles that
-    /// add to the instruction's.
+    /// What follows an instruction that was stalled by DMA, took an interrupt
+    /// or ended a loop iteration; returns the extra cycles.
     #[inline(never)]
     fn after_instruction(&mut self, pc_before: u32) -> io::Result<u32> {
         let mut cycles = 0;
-        // DMA stalls the CPU for as long as it owns the bus. Charging a stall
-        // advances time, which can trigger further transfers (a refill that
-        // crosses a scanline, say), so drain until none is left; otherwise
-        // the follow-on stall would be billed to the next instruction.
+        // Charging a DMA stall advances time, which can trigger more
+        // transfers, so drain until none is left.
         while self.memory.dma_stall_pending() {
             let dma_cycles = self.memory.take_dma_cycles();
             self.cpu.cycles += u64::from(dma_cycles);
@@ -278,22 +235,20 @@ impl Emulator {
             self.advance_bus(3);
             cycles += 3;
         }
-        // Looked at last, once this step's DMA stall and interrupt entry have
-        // been charged, so loop timestamps measure only the loop itself.
+        // Last, so loop timestamps measure only the loop itself.
         if self.skip_idle_loops && self.cpu.registers[15] <= pc_before {
             cycles += self.skip_idle_iterations();
         }
         Ok(cycles)
     }
 
-    /// Where `pc` falls in the hook filter: a bit per halfword of address,
-    /// folded to [`HOOK_FILTER_BITS`].
+    /// The filter bit for `pc`.
     #[inline(always)]
     fn hook_slot(pc: u32) -> usize {
         (pc >> 1) as usize & (HOOK_FILTER_BITS - 1)
     }
 
-    /// Marks `address` as one that [`Self::run_hooks`] must look at.
+    /// Marks `address` for [`Self::run_hooks`].
     fn watch(&mut self, address: u32) {
         if address != NO_HOOK {
             let slot = Self::hook_slot(address);
@@ -301,8 +256,7 @@ impl Emulator {
         }
     }
 
-    /// Rebuilds the filter from the hook addresses that are in use. Called
-    /// whenever they change.
+    /// Rebuilds the filter from the hooks in use.
     fn refresh_hook_filter(&mut self) {
         self.hook_filter.fill(0);
         let fixed = [
@@ -314,21 +268,22 @@ impl Emulator {
             self.build_hook,
             self.encounter_hook,
             self.wild_species_hook,
-            self.tm_use_a.unwrap_or(NO_HOOK),
-            self.tm_use_b.unwrap_or(NO_HOOK),
         ];
         for address in fixed {
             self.watch(address);
         }
+        for address in self.tm_uses.clone() {
+            self.watch(address);
+        }
+        if let Some(moves) = self.field_moves {
+            self.watch(moves.knows_move_return);
+        }
     }
 
-    /// The cheats hooked to ROM addresses, run when the CPU is about to
-    /// execute one of them (`pc_before`; the filter may also let through
-    /// other addresses that share its bit).
+    /// Runs the cheats hooked at `pc_before` (the filter may let other
+    /// addresses through).
     #[inline(never)]
     fn run_hooks(&mut self, pc_before: u32) {
-        // Cheats hooked to a ROM address run when execution reaches it, as
-        // the cartridge's code handler would.
         if pc_before == self.cheat_hook {
             self.cheats.apply(&mut self.memory);
         }
@@ -344,32 +299,39 @@ impl Emulator {
         } else if pc_before == self.wild_return {
             self.wild_return = NO_HOOK;
         }
-        // Infinite money: at the end of `GetMoney`, the balance returned is
-        // the largest the game allows.
+        // Infinite money: `GetMoney` returns the largest balance.
         if pc_before == self.money_hook {
             self.cpu.registers[0] = money::SHOWN_BALANCE;
         }
-        // Infinitely usable TMs (always on): at the call that takes the TM
-        // out of the bag, ask for none of them.
-        if Some(pc_before) == self.tm_use_a || Some(pc_before) == self.tm_use_b {
+        // Infinite TMs (always on): ask the bag to remove none.
+        if self.tm_uses.contains(&pc_before) {
             self.cpu.registers[1] = 0;
         }
-        // No random encounters: the dice roll's answer is always "no".
+        // The first Pokémon knows every HM (always on): at the end of
+        // `MonKnowsMove`, `r6` is the Pokémon asked about, `r5` the move.
+        if let Some(moves) = self.field_moves
+            && pc_before == moves.knows_move_return
+            && field_moves::acts_as_known(
+                self.cpu.registers[6],
+                self.cpu.registers[5] & 0xFFFF,
+                moves.party_base,
+            )
+        {
+            self.cpu.registers[0] = 1;
+        }
+        // No random encounters: the dice roll always says no.
         if pc_before == self.encounter_hook {
             self.cpu.registers[0] = 0;
         }
-        // Boosted experience: the OT ID `IsTradedMon` is about to compare with
-        // the player's is made a different one, so the Pokémon counts as
-        // traded.
+        // Boosted experience: make the Pokémon look traded.
         if pc_before == self.exp_hook {
             self.cpu.registers[0] = experience::other_ot_id(self.cpu.registers[0]);
         }
-        // All Pokémon shiny, perfect stats: while a Pokémon is being built.
+        // Shiny and perfect stats: while a Pokémon is being built.
         if pc_before == self.build_hook {
             self.adjust_new_pokemon();
         }
-        // Wild-encounter override: replace the species and/or level
-        // arguments of the function that builds every wild encounter.
+        // Wild-encounter override: replace `CreateWildMon`'s arguments.
         if pc_before == self.wild_species_hook {
             if self.wild_species != NO_VALUE {
                 self.cpu.registers[0] = self.wild_species;
@@ -380,9 +342,8 @@ impl Emulator {
         }
     }
 
-    /// At the hook inside `CreateBoxMon` (see [`shiny`] and
-    /// [`perfect_stats`]): applies the cheats that are on to the Pokémon being
-    /// built. A memory fault leaves everything unchanged.
+    /// At the hook inside `CreateBoxMon`: applies the cheats that are on to
+    /// the Pokémon being built.
     fn adjust_new_pokemon(&mut self) {
         let sp = self.cpu.registers[13];
         let ot_id_type = self.cpu.registers[perfect_stats::OT_ID_TYPE_REGISTER];
@@ -402,9 +363,8 @@ impl Emulator {
         }
     }
 
-    /// Rewrites the personality value, in the local the function goes on to
-    /// read and in the `BoxPokemon` it was just stored in, so that the Pokémon
-    /// is shiny for its OT ID. Unown is left alone.
+    /// Rewrites the personality value (in the local and in the `BoxPokemon`)
+    /// so the Pokémon is shiny for its OT ID. Unown is left alone.
     fn make_new_pokemon_shiny(&mut self, sp: u32) {
         let box_mon = self.cpu.registers[shiny::BOX_MON_REGISTER];
         let memory = &mut self.memory;
@@ -427,17 +387,15 @@ impl Emulator {
         }
     }
 
-    /// Enables or disables idle-loop skipping (on by default). Skipping is
-    /// exact; the switch exists for debugging and for verifying that.
+    /// Enables or disables idle-loop skipping (on by default; it is exact).
     pub fn set_idle_loop_skipping(&mut self, enabled: bool) {
         self.skip_idle_loops = enabled;
         self.idle.reset();
     }
 
-    /// After a backward jump: if the loop is provably idle, advances time by
-    /// whole iterations, stopping at least one iteration short of the next
-    /// event so the event lands on exactly the instruction it would have.
-    /// Returns the cycles skipped.
+    /// After a backward jump: if the loop is provably idle, skips whole
+    /// iterations, stopping one short of the next event. Returns the cycles
+    /// skipped.
     fn skip_idle_iterations(&mut self) -> u32 {
         let Some(iteration) = self.idle.observe(&self.cpu, &self.memory) else {
             return 0;
@@ -459,7 +417,7 @@ impl Emulator {
         skipped
     }
 
-    /// Advances the bus and draws every scanline that finished meanwhile.
+    /// Advances the bus and draws the scanlines that finished.
     #[inline(always)]
     fn advance_bus(&mut self, cycles: u32) {
         self.memory.advance(cycles);
@@ -513,12 +471,8 @@ impl Emulator {
         self.memory.take_audio_samples()
     }
 
-    /// Enables or disables drawing. While disabled, emulation, timing and
-    /// frame-ready signalling continue unchanged but the framebuffer keeps
-    /// its last contents; used to skip frames that will not be shown.
-    ///
-    /// Switch it at frame boundaries (right after `take_frame_ready`):
-    /// affine background state is per frame and must see a whole frame.
+    /// Enables or disables drawing, to skip frames that will not be shown;
+    /// emulation is unaffected. Switch it at frame boundaries.
     pub fn set_rendering(&mut self, enabled: bool) {
         self.rendering = enabled;
     }
@@ -552,45 +506,38 @@ impl Emulator {
         self.ppu.render_frame(&self.memory);
     }
 
-    /// Installs the cheats applied by [`Emulator::apply_cheats`]. They survive
-    /// a [`reset`](Emulator::reset).
+    /// Installs the cheats file's codes; they survive a reset.
     pub fn set_cheats(&mut self, cheats: Cheats) {
         self.cheats = cheats;
         self.update_cheat_hook();
     }
 
     fn update_cheat_hook(&mut self) {
-        // The cheats file's raw codes run only while their row of the menu is
-        // switched on: some of them patch routines the game has loaded only
-        // at certain moments (writing them at the title screen crashes it).
+        // The file's codes run only while their menu row is on: some crash
+        // the game if written before it has loaded the routine they patch.
         self.cheat_hook = if self.cheat_options.file_codes {
             self.cheats.hook_address().unwrap_or(NO_HOOK)
         } else {
             NO_HOOK
         };
-        // The 100% catch rate row: hook the catch check while it is on.
         self.catch_hook = match self.catch_check {
             Some(address) if self.cheat_options.catch_always => address,
             _ => NO_HOOK,
         };
-        // The no-encounters row: hook the end of the encounter dice roll.
         self.encounter_hook = match self.encounter_roll {
             Some(address) if self.cheat_options.no_encounters => address,
             _ => NO_HOOK,
         };
-        // The experience row: hook the traded-Pokémon check.
         self.exp_hook = match self.exp_traded {
             Some(address) if self.cheat_options.exp_boost => address,
             _ => NO_HOOK,
         };
-        // The infinite-money row: hook the end of the balance reader.
         self.money_hook = match self.money_balance {
             Some(address) if self.cheat_options.infinite_money => address,
             _ => NO_HOOK,
         };
-        // The all-shiny and perfect-stats rows: hook where a Pokémon is being
-        // built. The perfect-stats row for wild Pokémon also watches
-        // `CreateWildMon`, to tell wild ones from the rest.
+        // Shiny and perfect stats hook where a Pokémon is built; perfect
+        // stats for wild Pokémon also watches `CreateWildMon`.
         self.make_shiny = self.cheat_options.shiny;
         self.shiny_one_in = self.cheat_options.shiny_odds.one_in();
         self.perfect_wild = self.cheat_options.perfect_for_wild();
@@ -605,7 +552,6 @@ impl Emulator {
             _ => NO_HOOK,
         };
         self.wild_return = NO_HOOK;
-        // The wild-encounter override, driven by its row of the menu.
         self.wild_species_hook = NO_HOOK;
         self.wild_species = NO_VALUE;
         self.wild_level = NO_VALUE;
@@ -625,9 +571,7 @@ impl Emulator {
         self.refresh_hook_filter();
     }
 
-    /// Installs the cheat menu's options. Today the wild-encounter row and the
-    /// cheats file's codes take effect; the other rows are kept for when they
-    /// are implemented.
+    /// Installs the cheat menu's options.
     pub fn set_cheat_options(&mut self, options: CheatOptions) {
         if options != self.cheat_options {
             self.cheat_options = options;
@@ -635,7 +579,7 @@ impl Emulator {
         }
     }
 
-    /// The hook addresses found in this ROM, for the settings file to keep.
+    /// The hook addresses found in this ROM, for the settings file.
     pub fn cheat_scan(&self) -> CheatScan {
         CheatScan {
             rom: crate::cheats::scan::RomFingerprint::of(&self.memory.rom),
@@ -645,8 +589,8 @@ impl Emulator {
             money_balance: self.money_balance,
             exp_traded: self.exp_traded,
             encounter_roll: self.encounter_roll,
-            tm_use_a: self.tm_use_a,
-            tm_use_b: self.tm_use_b,
+            tm_uses: self.tm_uses.clone(),
+            field_moves: self.field_moves,
         }
     }
 
@@ -654,21 +598,18 @@ impl Emulator {
         self.cheat_options
     }
 
-    /// The bus address the wild-species override hooks in this ROM (the entry
-    /// of `CreateWildMon`), or `None` when the ROM is not a FireRed build
-    /// whose function the signature scan can identify.
+    /// Where the wild-species override hooks (`CreateWildMon`'s entry), if
+    /// the ROM is recognised.
     pub fn wild_species_hook_address(&self) -> Option<u32> {
         self.create_wild_mon
     }
 
-    /// The bus address the 100% catch rate cheat hooks in this ROM, or `None`
-    /// when it is not a FireRed build whose catch check can be found.
+    /// Where the 100% catch rate cheat hooks, if the ROM is recognised.
     pub fn catch_check_address(&self) -> Option<u32> {
         self.catch_check
     }
 
-    /// The bus address the all-shiny cheat hooks in this ROM, or `None` when
-    /// it is not a FireRed build whose `CreateBoxMon` can be found.
+    /// Where the shiny and perfect-stats cheats hook, if the ROM is recognised.
     pub fn build_hook_address(&self) -> Option<u32> {
         self.shiny_point
     }
@@ -682,10 +623,8 @@ impl Emulator {
         &self.cheats
     }
 
-    /// Writes the cheats' values into RAM. Call once per finished frame, so
-    /// the values keep winning against the game rewriting them. Cheats that
-    /// name a hook address are instead applied when execution reaches it (see
-    /// [`Emulator::step`]), so this does nothing for them.
+    /// Writes the cheats file's values into RAM; call once per finished
+    /// frame. Codes with a hook address run at the hook instead.
     pub fn apply_cheats(&mut self) {
         if self.cheat_options.file_codes && self.cheat_hook == NO_HOOK && !self.cheats.is_empty() {
             self.cheats.apply(&mut self.memory);

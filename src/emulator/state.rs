@@ -1,10 +1,9 @@
 //! Whole-console save states.
 //!
-//! Layout: an 8-byte magic, a format version, the ROM's length and header
-//! hash (so a state is only loaded into the game that made it), the payload
-//! length and an FNV-1a checksum of the payload, then the payload itself. The
-//! header and checksum are verified before anything is modified, so a stale or
-//! damaged file is rejected without disturbing the running game.
+//! Layout: an 8-byte magic, a format version, the ROM's length and header hash
+//! (so a state only loads into its own game), the payload length and an
+//! FNV-1a checksum, then the payload. Everything is verified before anything
+//! is modified, so a bad file never disturbs the running game.
 
 use super::{Emulator, NO_HOOK};
 use crate::state::{StateReader, StateWriter, fnv1a};
@@ -50,9 +49,8 @@ impl Emulator {
 
     /// Restores a state made by [`Emulator::save_state`] for the same ROM.
     ///
-    /// Nothing is modified unless the header, ROM identity and checksum all
-    /// check out. The backup memory (battery save) is restored with the rest
-    /// and marked changed, so it is flushed to the save file.
+    /// Nothing is modified unless the header, ROM identity and checksum check
+    /// out. The backup memory is restored too and flushed to the save file.
     pub fn load_state(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut header = StateReader::new(bytes);
         let mut magic = [0; 8];

@@ -259,11 +259,8 @@ pub fn decode(opcode: u16) -> ThumbOp {
 }
 
 impl Cpu {
-    /// Fetches and executes one Thumb instruction at the current PC.
-    ///
-    /// The PC register points to the instruction being fetched. Sequential
-    /// instructions advance it by two bytes. Cycles count base instruction
-    /// cycles, including estimated memory wait states.
+    /// Fetches and executes one Thumb instruction, returning its cycles
+    /// including wait states.
     #[inline(never)]
     pub fn step_thumb(&mut self, bus: &mut MemoryBus) -> io::Result<u32> {
         let pc = self.registers[15];

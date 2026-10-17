@@ -1,9 +1,8 @@
 //! macOS implementation: messages the `NSWindow` behind the minifb window
 //! through the Objective-C runtime.
 //!
-//! All the `unsafe` is in the few functions of the "runtime" section below.
-//! Everything after it is ordinary safe code that names an AppKit selector
-//! and its argument and result types once.
+//! All the `unsafe` is in the "runtime" section below; the rest is safe code
+//! that names each AppKit selector with its argument and result types.
 
 use super::Window;
 use std::ffi::{CStr, c_char, c_void};
@@ -100,10 +99,8 @@ arguments!(a: A, b: B);
 
 /// Sends the message `name` with `arguments` to `object`, expecting an `R`.
 ///
-/// Module-private, and every call in this file pairs a selector with the
-/// types of its documented AppKit signature; `object` is always a live
-/// object (minifb's `NSWindow`, or one reached from it) used on the main
-/// thread, where the window was created.
+/// Safe because it is module-private: every call pairs a selector with its
+/// documented AppKit signature and uses a live object on the main thread.
 fn message<R, A: Arguments>(object: Id, name: &CStr, arguments: A) -> R {
     debug_assert!(!object.is_null());
     arguments.send(object, selector(name))

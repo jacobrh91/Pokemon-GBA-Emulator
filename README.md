@@ -58,14 +58,30 @@ game is played.
 | Row (checkbox at its left) | Other controls | Status |
 |---|---|---|
 | *n* codes from the cheats file (only when the file has codes) | | **active**; never remembered, so it starts off every session |
-| Wild Pokémon is *species* at level *n* | dropdown: ANY, then the 251 species; `-` / `+`, mouse wheel, `X` to clear for the level (empty keeps the game's) | **active** (FireRed) |
-| Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | **active** (FireRed) |
-| Infinite money | | **active** (FireRed) |
-| 100% catch rate | | **active** (FireRed) |
-| All experience is boosted | | **active** (FireRed); every Pokémon counts as traded (×1.5) |
-| Shiny chance | `-` / `+` steps 1/1, 1/2, 1/5, 1/10, 1/25, 1/50, 1/100, 1/500, 1/1000 (1/1 makes every Pokémon shiny, the default); Left / Right from the keyboard | **active** (FireRed) |
-| No random encounters | | **active** (FireRed) |
-| TMs are infinitely usable | | **always on** (FireRed): shown ticked at the bottom, with no switch |
+| Wild Pokémon is *species* at level *n* | dropdown: ANY, then the 251 species; `-` / `+`, mouse wheel, `X` to clear for the level (empty keeps the game's) | **active** (FireRed / LeafGreen / Emerald) |
+| Perfect stats for | dropdown: WILD POKEMON, OPPONENTS POKEMON or BOTH (wild first, the default) | **active** (FireRed / LeafGreen / Emerald) |
+| Infinite money | | **active** (FireRed / LeafGreen / Emerald) |
+| 100% catch rate | | **active** (FireRed / LeafGreen / Emerald) |
+| All experience is boosted | | **active** (FireRed / LeafGreen / Emerald); every Pokémon counts as traded (×1.5) |
+| Shiny chance | `-` / `+` steps 1/1, 1/2, 1/5, 1/10, 1/25, 1/50, 1/100, 1/500, 1/1000 (1/1 makes every Pokémon shiny, the default); Left / Right from the keyboard | **active** (FireRed / LeafGreen / Emerald) |
+| No random encounters | | **active** (FireRed / LeafGreen / Emerald) |
+| TMs are infinitely usable | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
+| First Pokémon knows every HM | | **always on** (FireRed / LeafGreen / Emerald): shown ticked at the bottom, with no switch |
+
+The built-in rows work on Pokémon **FireRed, LeafGreen and Emerald**: the games
+share most of their code, and the ROM is recognised by its game code in the
+cartridge header (`BPR?` for FireRed, `BPG?` for LeafGreen, `BPE?` for
+Emerald). LeafGreen
+v1.1 (US) was checked in the game: from a save state in the grass the first
+wild Pokémon was a Mankey at level 5 with the cheats off and a shiny level-4
+Blastoise with the wild-species and shiny rows on, and no encounter came in
+7,000 frames of walking with *no random encounters* on. Emerald (USA, Europe)
+has every hook found by disassembling the ROM, at addresses listed in
+`src/cheats/gen3/mod.rs`, and boots with every cheat switched on; it has **not
+been checked in the game yet**. Where Emerald's code is compiled differently
+the cheat has a second signature for it (the wild-encounter function, the TM
+lesson, the key offset in `GetMoney`, the encounter divisor 2880 against 1600).
+Ruby, Sapphire and other games are left alone.
 
 - **From the keyboard**, while the menu is open the game gets no buttons and
   the movement keys drive the menu. The first press only shows which row has the
@@ -90,7 +106,7 @@ game is played.
   its right edge. Species and level are independent: a species alone keeps the
   area's level, and a level alone keeps the species.
 - **Wild encounters** are changed through the function hook described under
-  *Wild species override*, in the FireRed builds listed there; they need no
+  *Wild species override*, in the builds listed there; they need no
   `.cheats` file.
 - **Rows tagged SOON** would be stored and shown but not change the game yet; every row is active at present, so none is tagged.
 
@@ -127,7 +143,7 @@ frame, a patch like the popular wild-encounter code crashes the game during the
 intro; switched on after the game is up it runs normally. Use such cheats on
 demand, the way a cartridge's on/off menu did.
 
-### 100% catch rate (Pokémon FireRed)
+### 100% catch rate (FireRed, LeafGreen and Emerald)
 
 A thrown ball is resolved by one battle-script command: it works out `odds`
 from the target's catch rate, the ball and the target's HP and status, and then
@@ -136,7 +152,7 @@ a shake roll decides. With the row switched on, `odds` is set to 255 at that
 test, so every ball is a catch, whatever the species, level, HP or ball. It
 works in the same builds as the wild species override (the address of the test
 is found by a signature scan of the ROM, like `CreateWildMon`; the table in
-`src/cheats/firered/mod.rs` lists the addresses).
+`src/cheats/gen3/mod.rs` lists the addresses).
 
 In the game, a thrown Poké Ball at a wild level-100 Mewtwo at full health, which
 breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
@@ -144,16 +160,16 @@ breaks free ("Oh, no! The POKéMON broke free!") with the cheat off, is caught
 Trainers' Pokémon cannot be caught either way: the game refuses the ball
 before this test.
 
-### Infinitely usable TMs (Pokémon FireRed)
+### Infinitely usable TMs (FireRed, LeafGreen and Emerald)
 
 When a Pokémon has learned its move from a TM, the game takes the item out of
 the bag unless it is an HM (`RemoveBagItem(item, 1)`, guarded by "item is at
 most TM50"). The emulator sets the count of that call to 0, so the TM stays at
-its count. This cheat is **always on** while a FireRed ROM is recognised: it
+its count. This cheat is **always on** while a FireRed or LeafGreen ROM is recognised: it
 has no switch and the menu lists it last, ticked and tagged ALWAYS ON. The
 code appears twice in every build (one for each way of finishing the lesson:
 a free move slot, or replacing a move) and both places are hooked, found by a
-signature scan (`src/cheats/firered/tm.rs`). Selling or tossing a TM is not
+signature scan (`src/cheats/gen3/tm.rs`). Selling or tossing a TM is not
 affected, only using it.
 
 Checked on v1.1 from the save state about to teach TM39 Rock Tomb to a Mewtwo:
@@ -161,7 +177,38 @@ without the hook the game calls `RemoveBagItem(327, 1)`; with it the call is
 `RemoveBagItem(327, 0)`. The other builds have the same bytes (two matches
 each) but were not run in the game.
 
-### No random encounters (Pokémon FireRed)
+### The first Pokémon knows every HM (FireRed, LeafGreen and Emerald)
+
+Whenever the game asks whether a Pokémon knows a move (the tree or boulder in
+front of the player, a rock to smash, water at the shore) it calls one small
+function, `MonKnowsMove(mon, move)`. The emulator stops at its return and, when
+the question is about the **first slot of the party** and the move is an HM
+(Cut, Fly, Surf, Strength, Waterfall, Flash, Rock Smash or Dive), changes the
+answer to yes. The scripts then go on as if that Pokémon had the move, including
+"X used CUT!" naming it; its real moves are never changed, and the other
+Pokémon are asked normally. This cheat is **always on** while a recognised ROM
+is loaded: it has no switch and the menu lists it last, ticked and tagged
+ALWAYS ON.
+
+"The first slot" is found without a table of RAM addresses: the party array's
+address is read from the literal pool of the script command that checks the
+party (`checkpartymove`), which is found by its bytes
+(`src/cheats/gen3/field_moves.rs`). It is `0x02024284` in the English FireRed
+and LeafGreen builds, `0x020241E4` in the Japanese one and `0x020244EC` in
+Emerald, as the scan reads them.
+
+Only the game's own checks are covered. Choosing a field move from the START
+menu's party list (to Fly somewhere, for instance) reads the Pokémon's moves
+directly, so that menu does not list the HMs it does not really know.
+
+Checked on LeafGreen v1.1 from the save state in front of a cuttable tree
+with no Pokémon knowing Cut: A on the tree says "This tree looks like it can
+be CUT" and offers "Would you like to CUT it?"; answering yes plays the field-move
+animation with the first Pokémon and the tree is gone. A unit test runs the
+function's real bytes for every supported game. The other builds have the
+same code (the scan finds it once in each), but were not run in the game.
+
+### No random encounters (FireRed, LeafGreen and Emerald)
 
 Every step on an encounter tile asks one small function whether a wild
 encounter happens: it compares `Random() % 1600` with the encounter rate (after
@@ -170,13 +217,13 @@ returns 1 for "yes". With the row on, the emulator sets that answer to 0 at the
 end of the function, so the game carries on as if the dice had said no. Steps
 are still counted, a Repel still wears off, and fishing and scripted or static
 encounters (which do not ask) still work. The function is found by a signature
-scan (`src/cheats/firered/encounters.rs`).
+scan (`src/cheats/gen3/encounters.rs`).
 
 The hook is covered by a unit test that runs the function's real bytes in the
 emulator (`the_encounter_cheat_turns_every_yes_into_no`), the signature matches
 once in each of the three builds, and it was tried in the game on v1.1.
 
-### Boosted experience (Pokémon FireRed)
+### Boosted experience (FireRed, LeafGreen and Emerald)
 
 A Pokémon that was received in a trade earns 1.5 times the experience (the
 game shows "a boosted Exp. Points"). The game stores no "traded" flag: it
@@ -188,7 +235,7 @@ Pokémon's OT ID and the emulator inverts it before the comparison. Nothing is
 changed in the Pokémon, so the Pokémon already in the party are covered too,
 and the check is only made when experience is awarded, so obedience is not
 affected (the player's Pokémon do not start disobeying). The place is found by
-a signature scan (`src/cheats/firered/experience.rs`); the bonus itself is the
+a signature scan (`src/cheats/gen3/experience.rs`); the bonus itself is the
 game's, so it stacks with the Lucky Egg and the trainer-battle bonus as usual.
 
 Checked on v1.1 from the save state in a battle against a wild level-5 Pokémon
@@ -197,7 +244,7 @@ row and 61 with it (41 × 150 / 100, rounded down). A Pokémon that is level 100
 gains nothing either way. The other builds have the same bytes (the signature
 matches once in each) but were not run in the game.
 
-### Infinite money (Pokémon FireRed)
+### Infinite money (FireRed, LeafGreen and Emerald)
 
 Every reader of the balance goes through one small function, `GetMoney`, which
 decrypts the stored balance with the save's key. With the row on, the emulator
@@ -209,7 +256,7 @@ from it, so it is capped by the game's own limit of 99 rather than your wallet
 balance, so the real balance becomes 999,999 minus what was spent; it is hidden
 while the cheat is on, and is what is left when it is switched off. The
 function is found from `IsEnoughMoney`, whose bytes are unique and which
-begins by calling it (`src/cheats/firered/money.rs`).
+begins by calling it (`src/cheats/gen3/money.rs`).
 
 A shop that is already open keeps the number it drew until the game redraws the
 money box (after a purchase, or on leaving and re-entering), so switch the row
@@ -221,7 +268,7 @@ completes ("Here you are! Thank you!") and the money box then shows ¥999999.
 The other builds have the same bytes (the signatures match once in each) but
 were not run in the game.
 
-### Perfect stats (Pokémon FireRed)
+### Perfect stats (FireRed, LeafGreen and Emerald)
 
 `CreateBoxMon` keeps its `fixed_iv` argument in a local and tests it: above 31
 each IV is drawn at random, otherwise all six IVs are that value. With the row
@@ -245,7 +292,7 @@ the grass state starts a trainer battle): the trainer's two Pokémon have IVs of
 0 without the cheat and `[31, 31, 31, 31, 31, 31]` with the target set to
 opponents or both, and are unchanged with it set to wild only.
 
-### Shiny chance (Pokémon FireRed)
+### Shiny chance (FireRed, LeafGreen and Emerald)
 
 In generation III a Pokémon is shiny when `OT ID high ^ OT ID low ^ PID high ^
 PID low` is below 8; shininess is not stored, it follows from the personality
@@ -260,14 +307,14 @@ drew, so it needs no random numbers of its own and does not disturb the game's.
 Unown is skipped: its letter is made of the PID's
 low bits. It applies to every Pokémon the game creates from then on (wild,
 trainers', gifts, eggs), not to ones already in the party or boxes. The place
-is found by a signature scan like the others (`src/cheats/firered/shiny.rs`).
+is found by a signature scan like the others (`src/cheats/gen3/shiny.rs`).
 
 From the save states in the grass, the first wild Pokémon is shiny with the
 row on, with the same OT ID, gender and nature as without it, on v1.0, v1.1 and
 the Japanese build. These checks were run by hand from save states and are not
 automated tests, since they depend on a save state being in a particular place.
 
-### Wild species override (Pokémon FireRed)
+### Wild species override (FireRed, LeafGreen and Emerald)
 
 ```text
 wild_species = Dratini
@@ -287,15 +334,16 @@ does not depend on the stack or RAM layout. The function's address differs
 between builds, so it is found when the ROM is opened by a **signature scan**:
 the function's first 16 bytes (a compiler prologue with no branch or pool
 operands, so identical in every build) are searched for in the ROM, and the
-override is used only if there is exactly one match in a `BPR?` (FireRed)
-cartridge. Otherwise it is ignored, with a message in the terminal. The full
-explanation is in `src/cheats/firered/wild_species.rs`.
+override is used only if there is exactly one match in a `BPR?` (FireRed),
+`BPG?` (LeafGreen) or `BPE?` (Emerald, which has its own signature) cartridge. Otherwise it is ignored, with a message in the terminal. The full
+explanation is in `src/cheats/gen3/wild_species.rs`.
 
 | Build | Game code | Version | Function at | Checked |
 |---|---|---|---|---|
 | FireRed v1.0 (US) | `BPRE` | 0 | `0x080829FC` | live encounter |
 | FireRed v1.1 (US) | `BPRE` | 1 | `0x08082A10` | live encounter |
 | FireRed (Japan) | `BPRJ` | 0 | `0x080825E8` | live encounter |
+| LeafGreen v1.1 (US) | `BPGE` | 1 | `0x080829E4` | live encounter |
 
 In a headless test from a real save standing in grass, every encounter on v1.0,
 v1.1 and the Japanese build was Dratini where the control runs gave Rattata or
@@ -405,7 +453,7 @@ src/
   settings.rs  Per-game settings file (volume, window, speed)
   cheats/      Cheats, by mechanism:
     codebreaker.rs   CodeBreaker-format codes from a `.cheats` file (RAM writes)
-    firered/         Built-in FireRed cheats found by signature scan:
+    gen3/            Built-in Pokémon cheats (FireRed, LeafGreen, Emerald) found by signature scan:
       wild_species.rs  wild-encounter override (function arguments at its entry)
       catch_rate.rs    100% catch rate (a value inside the ball-throw routine)
       encounters.rs    no random encounters (the answer of the per-step dice roll)

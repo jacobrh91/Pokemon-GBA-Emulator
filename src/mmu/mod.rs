@@ -210,8 +210,8 @@ impl MemoryBus {
         storage.get_mut(offset..offset.checked_add(length)?)
     }
 
-    /// Instruction fetch for the common cases (ROM, IWRAM, EWRAM), falling
-    /// back to a normal read for everything else.
+    /// Instruction fetch: ROM, IWRAM and EWRAM directly, a normal read
+    /// otherwise.
     #[inline]
     pub fn fetch_u16(&self, address: u32) -> io::Result<u16> {
         let bytes = match address >> 24 {
@@ -346,9 +346,8 @@ impl MemoryBus {
         Ok(())
     }
 
-    /// Accounts `cycles` of CPU time. The work (display events, timers,
-    /// audio) is deferred until something observable is due; register reads
-    /// that depend on time compute their value from the pending cycles.
+    /// Accounts `cycles` of CPU time; the work is deferred until something
+    /// observable is due.
     #[inline(always)]
     pub fn advance(&mut self, cycles: u32) {
         self.pending_cycles = self.pending_cycles.saturating_add(cycles);
@@ -357,8 +356,7 @@ impl MemoryBus {
         }
     }
 
-    /// Brings the display, timers and audio up to date. Needed before
-    /// anything inspects their internal state directly.
+    /// Brings the display, timers and audio up to date.
     pub fn sync(&mut self) {
         self.flush_pending();
     }
@@ -373,8 +371,7 @@ impl MemoryBus {
         }
     }
 
-    /// Recomputes how long the bus can run before something observable
-    /// happens: a scanline start or HBlank, a timer overflow, or a sample.
+    /// Recomputes how long the bus can run before the next observable event.
     fn reschedule(&mut self) {
         let in_line = self.display_cycles % CYCLES_PER_SCANLINE;
         let mut distance = if in_line < HBLANK_START_CYCLES {
@@ -392,8 +389,7 @@ impl MemoryBus {
         self.write_count
     }
 
-    /// Time-application events so far (scanline/timer/audio events and
-    /// register writes).
+    /// Times pending time was applied so far.
     pub fn flush_count(&self) -> u64 {
         self.flush_count
     }
@@ -403,9 +399,7 @@ impl MemoryBus {
         self.volatile_reads.get()
     }
 
-    /// Cycles the CPU can still run before anything observable happens
-    /// (a scanline or HBlank, a timer overflow, an audio sample). Time can
-    /// be advanced by less than this without any event occurring.
+    /// Cycles the CPU can still run before the next observable event.
     pub fn cycles_until_next_event(&self) -> u32 {
         self.cycles_until_event.saturating_sub(self.pending_cycles)
     }

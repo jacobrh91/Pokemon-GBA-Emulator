@@ -1,15 +1,11 @@
 //! Randomness after loading a save state.
 //!
-//! Emulation is deterministic, so a restored state replays identically: the
-//! same inputs on the same frame give the same result, including the game's
-//! random number generator (Gen 3 Pokémon advances its generator once per
-//! frame, so a failed catch fails the same way every time). To get a fresh
-//! outcome, the console is run a few extra frames, silently, before the player
-//! gets control back; the generator is then somewhere else for the same
-//! inputs.
+//! A restored state replays identically, including the game's random number
+//! generator, so a failed catch would fail the same way every time. To get a
+//! fresh outcome the console runs a few extra frames, silently, before the
+//! player gets control back.
 //!
-//! The extra frame counts come from a shuffled bag, so a count is not repeated
-//! until every count has been used once.
+//! The counts come from a shuffled bag, so none repeats until all are used.
 
 use gba_emulator::emulator::Emulator;
 use std::collections::hash_map::RandomState;

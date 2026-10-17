@@ -167,7 +167,7 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
                 "cheats: the cheats file sets the wild species to {name} ({species}); tick its checkbox in the cheat menu (Tab) to use it (found CreateWildMon at {address:#010X})"
             ),
             None => eprintln!(
-                "cheats: the cheats file sets the wild species to {name}, but this ROM is not a FireRed build whose wild-encounter function can be found"
+                "cheats: the cheats file sets the wild species to {name}, but this ROM is not a FireRed, LeafGreen or Emerald build whose wild-encounter function can be found"
             ),
         }
     }
@@ -254,12 +254,8 @@ pub fn run(rom_path: &str, save_path: &Path) -> Result<(), Box<dyn Error>> {
         }
         upscale(&frame_pixels, &mut display_buffer);
 
-        // The picture is scaled into the window, so the mouse position has to
-        // be mapped back to the 960x640 buffer the dock is drawn in. Ask the
-        // window system for the cursor relative to the picture view itself:
-        // minifb's own mouse values are computed against a rectangle that is
-        // wrong in full screen and after leaving it, and it clips against a
-        // window size it only refreshes when a resize drag ends.
+        // Map the mouse back to the 960x640 buffer the dock is drawn in, using
+        // the window system's position (minifb's is wrong in full screen).
         let buffer_size = (WINDOW_WIDTH, WINDOW_HEIGHT);
         let position = match window_control::pointer_in_picture_view(&window) {
             Some((pointer, view_size)) => {

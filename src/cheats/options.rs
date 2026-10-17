@@ -1,16 +1,11 @@
-//! The options of the cheat menu: built-in, game-specific cheats that are
-//! switched on and off while playing, as opposed to the raw codes of a
-//! `.cheats` file (see [`super::codebreaker`]).
-//!
-//! Which options act on the game today is recorded in [`CheatOptions::is_live`];
-//! the rest are stored, shown and persisted so the menu is complete, but do not
-//! change the game yet.
+//! The options of the cheat menu: built-in cheats switched on and off while
+//! playing, as opposed to the raw codes of a `.cheats` file (see
+//! [`super::codebreaker`]).
 
 /// Highest level the game allows.
 pub const MAX_LEVEL: u8 = 100;
 
-/// How often the shiny cheat makes a Pokémon shiny: one in N, chosen from a
-/// short ladder from every Pokémon (1/1) to one in a thousand.
+/// How often the shiny cheat applies: one in N, from a ladder of 1 to 1000.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShinyOdds(u8);
 
@@ -93,43 +88,36 @@ impl PerfectTarget {
     }
 }
 
-/// Every row of the menu has its own switch (a checkbox at its left). The two
-/// rows that carry settings of their own, wild encounters and perfect stats,
-/// keep the switch (`wild_enabled`, `perfect_enabled`) apart from the settings
-/// so that a row can be turned off without losing what was chosen in it.
+/// Every row has its own switch. Rows with settings of their own (wild
+/// encounters, perfect stats, shiny) keep the switch apart from the settings,
+/// so a row can be turned off without losing its choices.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CheatOptions {
-    /// Pokémon are made shiny (FireRed), at the chance `shiny_odds`.
+    /// Pokémon are made shiny (FireRed / LeafGreen / Emerald), at the chance `shiny_odds`.
     pub shiny: bool,
     /// How often. Remembered while the row is off.
     pub shiny_odds: ShinyOdds,
-    /// Switch of the wild-encounter row. While off, `wild_species` and
-    /// `wild_level` are remembered but do nothing.
+    /// Switch of the wild-encounter row; the choices below are kept while off.
     pub wild_enabled: bool,
-    /// Every wild encounter is this species (national dex number), or `None`
-    /// to leave species alone.
+    /// Species of every wild encounter (national dex number), or `None`.
     pub wild_species: Option<u16>,
-    /// Every wild encounter is at this level (1..=100), or `None` to keep the
-    /// level the game chose.
+    /// Level of every wild encounter (1..=100), or `None` for the game's.
     pub wild_level: Option<u8>,
-    /// Switch of the perfect-stats row. While off, the target below is
-    /// remembered but does nothing.
+    /// Switch of the perfect-stats row; the target is kept while off.
     pub perfect_enabled: bool,
-    /// Whose Pokémon get maximum IVs (FireRed).
+    /// Whose Pokémon get maximum IVs (FireRed / LeafGreen / Emerald).
     pub perfect_target: PerfectTarget,
-    /// The player never runs out of money (FireRed).
+    /// The player never runs out of money (FireRed / LeafGreen / Emerald).
     pub infinite_money: bool,
-    /// Walking never starts a wild encounter (FireRed).
+    /// Walking never starts a wild encounter (FireRed / LeafGreen / Emerald).
     pub no_encounters: bool,
-    /// Every thrown ball catches (FireRed).
+    /// Every thrown ball catches (FireRed / LeafGreen / Emerald).
     pub catch_always: bool,
     /// All experience gained is boosted: every Pokémon is treated as a traded
-    /// one (FireRed).
+    /// one (FireRed / LeafGreen / Emerald).
     pub exp_boost: bool,
-    /// The raw codes of the `.cheats` file are applied. Never saved: those
-    /// codes patch the game's own routines and can crash it if they are on
-    /// before it has loaded the routine they target, so they start off every
-    /// session.
+    /// The `.cheats` file's codes are applied. Never saved: they can crash
+    /// the game if on before it has loaded what they patch.
     pub file_codes: bool,
 }
 
@@ -147,8 +135,7 @@ pub enum CheatOption {
 }
 
 impl CheatOptions {
-    /// True when the option changes the game today. Options that are not live
-    /// can be switched in the menu and are kept, but have no effect yet.
+    /// True when the option changes the game.
     pub fn is_live(option: CheatOption) -> bool {
         matches!(
             option,

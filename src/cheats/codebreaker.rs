@@ -1,9 +1,8 @@
 //! Cheat codes in the CodeBreaker format: one `XXXXXXXX YYYY` pair (8 + 4 hex
 //! digits) per line, kept in a text file beside the ROM.
 //!
-//! A cheat is applied by writing a constant into RAM once per frame, so it
-//! keeps winning against the game rewriting that location. The code types
-//! understood are:
+//! Cheats write constants into RAM, once per frame so they keep winning
+//! against the game. The code types understood are:
 //!
 //! | Code | Meaning |
 //! |---|---|
@@ -12,26 +11,19 @@
 //! | `0000xxxx 000y` | master code 1: game identity (ignored) |
 //! | `1aaaaaaa yyyy` | master code 2: hook at ROM offset `aaaaaaa` |
 //!
-//! On real hardware a CodeBreaker cartridge has to get its code handler to run
-//! regularly, so its *master codes* name the game and a ROM address, executed
-//! every frame, where the cartridge hooks itself in. The cheat writes then
-//! happen *from that point in the program*.
+//! A master code `1aaaaaaa yyyy` names a ROM address that the real cartridge
+//! hooks itself into. Many codes poke stack addresses that are only harmless
+//! at that point, so with a hook the writes run each time execution reaches
+//! it; without one they run once per finished frame.
 //!
-//! That matters: many codes poke addresses in the middle of the stack, which
-//! only holds something harmless at that one point. So when a code of the form
-//! `1aaaaaaa yyyy` names a hook, the writes are performed each time execution
-//! reaches that ROM address, exactly like the cartridge. Without one (plain
-//! RAM-poke codes), they are performed once per finished frame instead.
+//! Only RAM (EWRAM `0x02......`, IWRAM `0x03......`) can be written; any other
+//! line is reported as a warning and skipped.
 //!
-//! Only RAM (EWRAM `0x02......` and IWRAM `0x03......`) can be written. Any
-//! other line is reported as a warning and skipped rather than guessed at.
-//!
-//! The file may also hold `key = value` directives, which are not memory
-//! writes but built-in, game-specific behaviours:
+//! The file may also hold `key = value` directives:
 //!
 //! | Directive | Meaning |
 //! |---|---|
-//! | `wild_species = Dratini` | every wild encounter is that species (a name, a dex number or `0x..`), FireRed only; the function is found by a signature scan |
+//! | `wild_species = Dratini` | every wild encounter is that species (a name, a dex number or `0x..`), FireRed, LeafGreen and Emerald only; the function is found by a signature scan |
 
 use super::species;
 use crate::mmu::MemoryBus;

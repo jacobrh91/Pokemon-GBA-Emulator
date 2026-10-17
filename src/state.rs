@@ -1,10 +1,6 @@
-//! A small binary codec for save states: little-endian fixed-width integers
-//! and length-prefixed byte runs, with no external dependencies.
-//!
-//! Each emulated component writes its own fields (see the `state` modules
-//! beside the CPU, bus, APU and PPU) in a fixed order and reads them back in
-//! the same order, so the format is only as stable as that order; the state
-//! header carries a version for that reason.
+//! A small binary codec for save states: little-endian integers and
+//! length-prefixed byte runs. Each component writes its fields in a fixed
+//! order and reads them back in the same order, hence the header's version.
 
 use std::io;
 

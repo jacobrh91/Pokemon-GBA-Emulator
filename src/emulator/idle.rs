@@ -6,11 +6,10 @@ use crate::mmu::MemoryBus;
 
 /// Recognises a loop that leaves the whole machine state unchanged.
 ///
-/// At every backward jump the detector compares the CPU state and the bus's
-/// write/volatile-read counters with those at the previous jump to the same
-/// address. If nothing changed, one more iteration would change nothing
-/// either, until an interrupt, DMA transfer or timer event intervenes, so the
-/// emulator may advance time by whole iterations up to the next event.
+/// At every backward jump the CPU state and the bus's write and
+/// volatile-read counters are compared with those at the previous jump to the
+/// same address. If nothing changed, nothing will until an event intervenes,
+/// so time may advance by whole iterations up to the next event.
 #[derive(Default)]
 pub(super) struct IdleLoopDetector {
     armed: bool,

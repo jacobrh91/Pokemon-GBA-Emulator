@@ -1,23 +1,14 @@
 //! The infinite-money cheat: the balance the game sees is always 999,999.
 //!
-//! **Mechanism: replace a value at the end of a routine**, like
-//! [`super::catch_rate`], but at the end of `GetMoney(&money)`, the one
-//! function every reader of the balance goes through. The emulator stops when
-//! the CPU is about to execute its `bx lr` and sets `r0`, the returned
-//! balance, to 999,999 (see `Emulator::step`).
+//! **Mechanism: replace a value at the end of a routine.** `GetMoney(&money)`
+//! is the one function every reader of the balance goes through; the emulator
+//! stops at its `bx lr` and sets `r0`, the returned balance, to 999,999 (see
+//! `Emulator::step`). The shop's money box, `IsEnoughMoney` and the quantity
+//! prompt (capped by the game's own limit of 99) all see it.
 //!
-//! Everything that looks at the balance therefore sees ¥999,999:
-//!
-//! * the money box of the shop and the start menu show it;
-//! * `IsEnoughMoney` (asked before every purchase) says yes;
-//! * the shop's quantity prompt works out the most you can afford from it, so
-//!   it is capped by the game's own limit of 99, not by your wallet (at the
-//!   default 1, pressing Down wraps to 99);
-//! * `RemoveMoney`, `AddMoney` and whiteout all start from it. Their results
-//!   are written back like any other balance, so the real balance moves to
-//!   999,999 minus the price of whatever was bought. It is hidden while the
-//!   cheat is on and is what is left when it is switched off, which is nearly
-//!   as much as the game allows.
+//! Purchases, `AddMoney` and whiteouts start from the shown balance and write
+//! the result back, so the real balance becomes 999,999 minus the price of
+//! whatever was bought: nearly the most the game allows once the cheat is off.
 //!
 //! # Finding it
 //!
@@ -36,16 +27,13 @@
 //! 70 47  bx   lr                  <- the hook
 //! ```
 //!
-//! These bytes also occur twice in other places of the ROM (the same code
-//! decrypts other protected values), so they cannot identify the function.
-//! `IsEnoughMoney` can: its bytes are unique, and it begins by calling
-//! `GetMoney`. The scan finds `IsEnoughMoney` (see [`IS_ENOUGH_SIGNATURE`]),
-//! decodes the target of its `BL`, checks that the target's bytes are the
-//! ones above, and hooks the `bx lr` 16 bytes in. As for the other scans, the
-//! ROM is used only for a `BPR?` cartridge and a single match (see
-//! [`super`]).
+//! These bytes also occur twice elsewhere in the ROM, so they cannot identify
+//! the function. `IsEnoughMoney` can: its bytes are unique and it begins by
+//! calling `GetMoney`. The scan finds `IsEnoughMoney` (see
+//! [`IS_ENOUGH_SIGNATURE`]), decodes the target of its `BL`, checks that the
+//! target's bytes are the ones above, and hooks the `bx lr` 16 bytes in.
 
-use super::{ROM_BASE, find_in_firered};
+use super::{ROM_BASE, Signature};
 
 /// What is shown as the balance while the cheat is on.
 pub(crate) const SHOWN_BALANCE: u32 = 999_999;
@@ -53,55 +41,76 @@ pub(crate) const SHOWN_BALANCE: u32 = 999_999;
 /// `IsEnoughMoney`, the locator: `push {r4, lr}; adds r4, r1, #0; bl
 /// GetMoney; cmp r0, r4; bhs +1; movs r0, #0; b +0; movs r0, #1; pop {r4};
 /// pop {r1}; bx r1`. `None` is the wildcard of the `BL`.
-pub(crate) const IS_ENOUGH_SIGNATURE: [Option<u8>; 24] = [
-    Some(0x10),
-    Some(0xB5),
-    Some(0x0C),
-    Some(0x1C),
-    None,
-    None,
-    None,
-    None,
-    Some(0xA0),
-    Some(0x42),
-    Some(0x01),
-    Some(0xD2),
-    Some(0x00),
-    Some(0x20),
-    Some(0x00),
-    Some(0xE0),
-    Some(0x01),
-    Some(0x20),
-    Some(0x10),
-    Some(0xBC),
-    Some(0x02),
-    Some(0xBC),
-    Some(0x08),
-    Some(0x47),
-];
+pub(crate) const IS_ENOUGH_SIGNATURE: Signature = Signature::new(
+    &[
+        Some(0x10),
+        Some(0xB5),
+        Some(0x0C),
+        Some(0x1C),
+        None,
+        None,
+        None,
+        None,
+        Some(0xA0),
+        Some(0x42),
+        Some(0x01),
+        Some(0xD2),
+        Some(0x00),
+        Some(0x20),
+        Some(0x00),
+        Some(0xE0),
+        Some(0x01),
+        Some(0x20),
+        Some(0x10),
+        Some(0xBC),
+        Some(0x02),
+        Some(0xBC),
+        Some(0x08),
+        Some(0x47),
+    ],
+    0,
+);
 
 /// The instructions of `GetMoney` after its first one (the `ldr` of a pool
-/// address, which is not compared), up to and including `bx lr`.
+/// address, which is not compared), up to and including `bx lr`, in
+/// FireRed and LeafGreen: the key is at `gSaveBlock2Ptr + 0xF20`.
 pub(crate) const GET_MONEY_BODY: [u8; 16] = [
     0x09, 0x68, 0xF2, 0x22, 0x12, 0x01, 0x89, 0x18, 0x00, 0x68, 0x09, 0x68, 0x48, 0x40, 0x70, 0x47,
+];
+
+/// The same in Emerald, where the key is at `gSaveBlock2Ptr + 0xAC` (an
+/// immediate add rather than a built constant):
+///
+/// ```text
+/// 09 68  ldr  r1, [r1]
+/// AC 31  adds r1, #0xAC
+/// 00 68  ldr  r0, [r0]
+/// 09 68  ldr  r1, [r1]
+/// 48 40  eors r0, r1
+/// 70 47  bx   lr
+/// ```
+pub(crate) const EMERALD_GET_MONEY_BODY: [u8; 12] = [
+    0x09, 0x68, 0xAC, 0x31, 0x00, 0x68, 0x09, 0x68, 0x48, 0x40, 0x70, 0x47,
 ];
 
 /// Offset of the `BL` to `GetMoney` within `IsEnoughMoney`.
 const CALL_OFFSET: u32 = 4;
 
-/// Offset of the `bx lr` within `GetMoney`.
-const RETURN_OFFSET: u32 = 16;
-
-/// The bus address of the `bx lr` at the end of `GetMoney` in `rom`, if `rom`
-/// is a FireRed cartridge and the function can be identified.
+/// The address of the `bx lr` ending `GetMoney`, if `rom` is a recognised
+/// game.
 pub fn find(rom: &[u8]) -> Option<u32> {
-    let is_enough = find_in_firered(rom, &IS_ENOUGH_SIGNATURE, 0)?;
+    let is_enough = IS_ENOUGH_SIGNATURE.find(rom)?;
     let get_money = bl_target(rom, is_enough + CALL_OFFSET)?;
     let start = usize::try_from(get_money.checked_sub(ROM_BASE)?).ok()?;
     // Skip the first halfword: a PC-relative load, whose offset is not part
-    // of the identification.
-    let body = rom.get(start + 2..start + 2 + GET_MONEY_BODY.len())?;
-    (body == GET_MONEY_BODY).then_some(get_money + RETURN_OFFSET)
+    // of the identification. The hook is the `bx lr`, the last instruction of
+    // whichever body this is.
+    [&GET_MONEY_BODY[..], &EMERALD_GET_MONEY_BODY[..]]
+        .into_iter()
+        .find_map(|body| {
+            let at = start + 2;
+            (rom.get(at..at + body.len())? == body).then(|| get_money + 2 + body.len() as u32 - 2)
+        })
 }
 
 /// The target of the Thumb `BL` pair at bus address `at`, if it is one.
@@ -138,7 +147,7 @@ mod tests {
     fn rom(game_code: &[u8; 4], is_enough: usize, get_money: usize, body: &[u8]) -> Vec<u8> {
         let mut rom = vec![0u8; 0x1000];
         rom[0xAC..0xB0].copy_from_slice(game_code);
-        for (index, byte) in IS_ENOUGH_SIGNATURE.iter().enumerate() {
+        for (index, byte) in IS_ENOUGH_SIGNATURE.bytes.iter().enumerate() {
             rom[is_enough + index] = byte.unwrap_or(0);
         }
         let distance = get_money as i32 - (is_enough as i32 + CALL_OFFSET as i32 + 4);
@@ -150,6 +159,11 @@ mod tests {
 
     #[test]
     fn the_hook_is_the_return_of_the_function_that_is_called() {
+        let image = rom(b"BPRE", 0x600, 0x400, &GET_MONEY_BODY);
+        assert_eq!(find(&image), Some(0x0800_0000 + 0x400 + 16));
+        // Emerald's shorter body, with the key at +0xAC.
+        let image = rom(b"BPEE", 0x600, 0x400, &EMERALD_GET_MONEY_BODY);
+        assert_eq!(find(&image), Some(0x0800_0000 + 0x400 + 12));
         let image = rom(b"BPRE", 0x600, 0x400, &GET_MONEY_BODY);
         assert_eq!(find(&image), Some(0x0800_0000 + 0x400 + 16));
         // A call forwards too.
@@ -177,12 +191,12 @@ mod tests {
     }
 
     #[test]
-    fn it_is_declined_unless_unique_aligned_and_firered() {
+    fn it_is_declined_unless_unique_aligned_and_gen3() {
         assert_eq!(find(&[]), None);
         assert_eq!(find(&[0; 8]), None);
         let image = rom(b"AXVE", 0x600, 0x400, &GET_MONEY_BODY);
         assert_eq!(find(&image), None);
-        let image = rom(b"BPGE", 0x600, 0x400, &GET_MONEY_BODY);
+        let image = rom(b"AXPE", 0x600, 0x400, &GET_MONEY_BODY);
         assert_eq!(find(&image), None);
         let mut two = rom(b"BPRE", 0x600, 0x400, &GET_MONEY_BODY);
         let copy = two[0x600..0x618].to_vec();

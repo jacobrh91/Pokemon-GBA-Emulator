@@ -1,9 +1,8 @@
-//! A control dock (power, restart, full screen, volume, fast-forward speed) that slides up from
-//! the bottom of the window whenever the mouse moves over it, and slides away
-//! again once the mouse has been still for a moment or leaves the window.
+//! A control dock (power, restart, full screen, volume, fast-forward speed,
+//! cheats) that slides up when the mouse moves and away when it is still.
 //!
-//! Interaction logic ([`Dock::update`]) is separate from drawing
-//! ([`Dock::draw`], in `draw.rs`) so it can be unit tested without a window.
+//! Interaction ([`Dock::update`]) is separate from drawing (`draw.rs`) so it
+//! can be tested without a window.
 
 mod cheat_menu;
 mod draw;

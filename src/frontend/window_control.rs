@@ -1,22 +1,15 @@
 //! Window behaviour minifb does not expose: a locked content aspect ratio, a
 //! minimum size and full-screen mode.
 //!
-//! These are implemented on macOS by messaging the underlying `NSWindow`
-//! through the Objective-C runtime (which minifb already links). On other
-//! platforms the calls are no-ops; the window is still resizable and the
-//! picture is letterboxed by minifb's aspect-ratio scale mode.
+//! On macOS these message the underlying `NSWindow` through the Objective-C
+//! runtime. Elsewhere the calls are no-ops and minifb letterboxes the picture.
 
 use minifb::Window;
 
-/// The mouse position in the coordinates of the view the picture is drawn
-/// into (origin top-left, in points), together with that view's size. `None`
-/// when the platform cannot say.
+/// The mouse position in points relative to the picture view (origin
+/// top-left), with that view's size; `None` if the platform cannot say.
 ///
-/// This asks the window system for the pointer relative to the picture view
-/// itself. minifb's own mouse values are measured against a content rectangle
-/// it derives from the window frame, which is wrong in full screen (off by the
-/// title-bar height) and after leaving full screen (where its view ends up
-/// smaller than that rectangle), so using them made the dock unreachable.
+/// minifb's own mouse values are wrong in full screen and after leaving it.
 pub fn pointer_in_picture_view(window: &Window) -> Option<((f32, f32), (f32, f32))> {
     #[cfg(target_os = "macos")]
     return mac::pointer_in_picture_view(window);
@@ -27,10 +20,8 @@ pub fn pointer_in_picture_view(window: &Window) -> Option<((f32, f32), (f32, f32
     }
 }
 
-/// The window's content size in points, excluding the title bar. While full
-/// screen this is the full-screen size, so callers only use it when windowed.
-/// Falls back to minifb's (possibly stale) size where the platform has no
-/// live value.
+/// The window's content size in points, excluding the title bar (falling back
+/// to minifb's size off macOS).
 pub fn content_size(window: &Window) -> (f32, f32) {
     #[cfg(target_os = "macos")]
     if let Some(size) = mac::content_size(window) {
@@ -40,14 +31,10 @@ pub fn content_size(window: &Window) -> (f32, f32) {
     (width as f32, height as f32)
 }
 
-/// Whether the left mouse button is physically down, read from the window
-/// system rather than from events delivered to the window.
-///
-/// minifb only learns about a click if the window receives the mouse-down
-/// event. While the window is not key (during the full-screen transition and
-/// until it is re-activated afterwards) the first click is consumed to
-/// activate it, so a click on the dock right after toggling full screen was
-/// lost. `None` when the platform cannot say.
+/// Whether the left mouse button is down, read from the window system rather
+/// than from events delivered to the window (a click right after toggling
+/// full screen is otherwise consumed to activate the window). `None` if the
+/// platform cannot say.
 pub fn left_button_down() -> Option<bool> {
     #[cfg(target_os = "macos")]
     return Some(mac::left_button_down());
@@ -60,14 +47,9 @@ pub fn contains(position: (f32, f32), size: (f32, f32)) -> bool {
     position.0 >= 0.0 && position.1 >= 0.0 && position.0 < size.0 && position.1 < size.1
 }
 
-/// Turns a raw window-space mouse position into buffer coordinates, or
-/// `None` when the cursor is outside the window.
-///
-/// The inside-the-window test is done here against the *live* window size
-/// instead of by minifb's `MouseMode::Discard`, which clips against a size it
-/// only refreshes at the end of a live-resize drag. After a resize that stale
-/// size threw away every cursor position in the newly exposed area, which
-/// included the dock, so its buttons stopped responding until minifb caught up.
+/// Turns a window-space mouse position into buffer coordinates, or `None`
+/// outside the window. The inside test uses the live window size, not
+/// minifb's `MouseMode::Discard`, which is stale after a resize.
 pub fn pointer_in_buffer(
     raw: Option<(f32, f32)>,
     window_size: (f32, f32),
@@ -77,11 +59,8 @@ pub fn pointer_in_buffer(
         .map(|position| window_to_buffer(position, window_size, buffer_size))
 }
 
-/// Maps a window-space point to buffer pixel coordinates.
-///
-/// The buffer is scaled uniformly to fit the window and centred, so there may
-/// be bars on two sides; points over a bar map outside `0..buffer`, which is
-/// what callers want (the cursor is still "in the window").
+/// Maps a window-space point to buffer pixel coordinates. The buffer is
+/// scaled to fit and centred; points over the bars map outside `0..buffer`.
 pub fn window_to_buffer(
     position: (f32, f32),
     window_size: (f32, f32),
