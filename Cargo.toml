@@ -2,6 +2,8 @@
 name = "gba_emulator"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/jacobrh91/Pokemon-GBA-Emulator"
 
 [dependencies]
 cpal = "0.18.2"
